@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║  🚀 GITHUB FOLDER UPLOADER - ULTRA PRO v3.0                    ║
-║  Full Feature: Upload, Edit, Delete, Create Repo, Drag & Drop  ║
-║  100% Fixed • Zero Crash • Modern Dark UI                       ║
+║  🚀 GITHUB UPLOADER PRO - ULTRA EDITION v4.0                   ║
+║  Modern Landscape UI • Blue Gradient • Full File Support        ║
 ╚══════════════════════════════════════════════════════════════════╝
 """
 
@@ -13,20 +12,27 @@ import json
 import threading
 import webbrowser
 import time
+import zipfile
+import shutil
+import tempfile
 from datetime import datetime
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
-# ── Auto-install PyGithub ──
+# ── Auto-install ──
+def _install(pkg):
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", pkg],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 try:
     from github import Github, GithubException
 except ImportError:
-    import subprocess
     print("📦 Installing PyGithub...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "PyGithub"])
+    _install("PyGithub")
     from github import Github, GithubException
 
-# ── Optional Drag & Drop ──
 DND_AVAILABLE = False
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -34,1472 +40,1612 @@ try:
 except ImportError:
     pass
 
-CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".github_uploader_v3.json")
+CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".github_uploader_v4.json")
+
+# ══════════════════════════════════════════════════════════════
+#  CONSTANTS & HELPERS
+# ══════════════════════════════════════════════════════════════
+
+SKIP_DIRS = {'.git','__pycache__','node_modules','.DS_Store','Thumbs.db',
+             '.vscode','.idea','dist','build','.pytest_cache','venv',
+             '.venv','env','.tox','.mypy_cache','.eggs'}
+
+FILE_ICONS = {
+    '.py':'🐍','.js':'⚡','.ts':'💎','.html':'🌐','.css':'🎨','.scss':'🎨',
+    '.json':'📋','.md':'📝','.txt':'📄','.yml':'⚙️','.yaml':'⚙️','.xml':'📰',
+    '.sql':'🗃️','.sh':'🖥️','.bat':'🖥️','.ps1':'🖥️',
+    '.png':'🖼️','.jpg':'🖼️','.jpeg':'🖼️','.gif':'🖼️','.svg':'🎨',
+    '.webp':'🖼️','.ico':'🖼️','.bmp':'🖼️','.tiff':'🖼️',
+    '.mp4':'🎬','.avi':'🎬','.mov':'🎬','.mkv':'🎬','.webm':'🎬',
+    '.mp3':'🎵','.wav':'🎵','.flac':'🎵','.aac':'🎵','.ogg':'🎵',
+    '.zip':'📦','.rar':'📦','.tar':'📦','.gz':'📦','.7z':'📦',
+    '.java':'☕','.cpp':'⚙️','.c':'⚙️','.h':'⚙️','.go':'🔵','.rs':'🦀',
+    '.php':'🐘','.dart':'🎯','.vue':'💚','.jsx':'⚛️','.tsx':'⚛️',
+    '.rb':'💎','.swift':'🍎','.kt':'🟣','.r':'📊','.m':'🟠',
+    '.pdf':'📕','.doc':'📘','.docx':'📘','.xls':'📗','.xlsx':'📗',
+    '.ppt':'📙','.pptx':'📙','.csv':'📊',
+    '.toml':'⚙️','.ini':'⚙️','.lock':'🔒','.env':'🔒',
+    '.dockerfile':'🐳','.gitignore':'🚫','.htaccess':'🔧',
+    '.wasm':'🕸️','.so':'🔧','.dll':'🔧','.exe':'💻',
+}
+
+# ── GRADIENTS & COLORS ──
+C = {
+    "bg":          "#050810",
+    "bg2":         "#0a0f1e",
+    "sidebar":     "#080d1a",
+    "card":        "#0d1528",
+    "card2":       "#111c35",
+    "input":       "#060b18",
+    "border":      "#1a2744",
+    "border_hi":   "#2a4080",
+    "text":        "#e8f0fe",
+    "sub":         "#8ba3cc",
+    "muted":       "#4a6080",
+    "blue1":       "#1a73e8",
+    "blue2":       "#0d47a1",
+    "blue3":       "#4fc3f7",
+    "blue4":       "#00b4ff",
+    "blue5":       "#0066ff",
+    "cyan":        "#00e5ff",
+    "purple":      "#7c4dff",
+    "green":       "#00c853",
+    "green2":      "#69f0ae",
+    "orange":      "#ff9100",
+    "red":         "#ff1744",
+    "grad1":       "#0d47a1",
+    "grad2":       "#1565c0",
+    "grad3":       "#1976d2",
+    "grad4":       "#42a5f5",
+    "accent":      "#00b4ff",
+}
+
+def icon_for(ext):
+    return FILE_ICONS.get(ext.lower(), "📄")
+
+def fmt_size(b):
+    if b < 1024: return f"{b} B"
+    if b < 1024**2: return f"{b/1024:.1f} KB"
+    if b < 1024**3: return f"{b/1024**2:.1f} MB"
+    return f"{b/1024**3:.1f} GB"
+
+def fmt_time(s):
+    if s < 60: return f"{s:.1f}s"
+    if s < 3600: return f"{s/60:.1f}m"
+    return f"{s/3600:.1f}h"
+
+def get_file_type(ext):
+    images = {'.png','.jpg','.jpeg','.gif','.svg','.webp','.ico','.bmp','.tiff'}
+    videos = {'.mp4','.avi','.mov','.mkv','.webm'}
+    audio  = {'.mp3','.wav','.flac','.aac','.ogg'}
+    zips   = {'.zip','.rar','.tar','.gz','.7z'}
+    code   = {'.py','.js','.ts','.java','.cpp','.c','.go','.rs','.php',
+              '.html','.css','.jsx','.tsx','.vue','.rb','.swift','.kt'}
+    docs   = {'.pdf','.doc','.docx','.xls','.xlsx','.ppt','.pptx'}
+    if ext in images: return "image"
+    if ext in videos: return "video"
+    if ext in audio:  return "audio"
+    if ext in zips:   return "archive"
+    if ext in code:   return "code"
+    if ext in docs:   return "document"
+    return "other"
 
 
 # ══════════════════════════════════════════════════════════════
-#  TOOLTIP (Pure Tkinter - No External Dependency)
+#  TOOLTIP
 # ══════════════════════════════════════════════════════════════
-class ToolTip:
-    def __init__(self, widget, text):
-        self.widget = widget
-        self.text = text
-        self.tip = None
-        widget.bind("<Enter>", self.show)
-        widget.bind("<Leave>", self.hide)
-
+class Tip:
+    def __init__(self, w, text):
+        self.w = w; self.text = text; self.tip = None
+        w.bind("<Enter>", self.show); w.bind("<Leave>", self.hide)
     def show(self, e=None):
-        if self.tip:
-            return
-        x = self.widget.winfo_rootx() + 25
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
-        self.tip = tw = tk.Toplevel(self.widget)
+        if self.tip: return
+        x = self.w.winfo_rootx() + 20
+        y = self.w.winfo_rooty() + self.w.winfo_height() + 4
+        self.tip = tw = tk.Toplevel(self.w)
         tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{x}+{y}")
         tw.attributes("-topmost", True)
-        frame = tk.Frame(tw, bg="#30363d", bd=1)
-        frame.pack()
-        tk.Label(frame, text=self.text, bg="#161b22", fg="#f0f6fc",
-                font=("Segoe UI", 9), padx=8, pady=4, justify="left").pack()
-
+        f = tk.Frame(tw, bg=C["border_hi"], bd=1)
+        f.pack()
+        tk.Label(f, text=self.text, bg=C["card2"], fg=C["text"],
+                font=("Segoe UI", 9), padx=10, pady=5).pack()
     def hide(self, e=None):
-        if self.tip:
-            self.tip.destroy()
-            self.tip = None
+        if self.tip: self.tip.destroy(); self.tip = None
 
 
 # ══════════════════════════════════════════════════════════════
-#  GITHUB ENGINE - ALL FEATURES
+#  GRADIENT CANVAS HELPERS
+# ══════════════════════════════════════════════════════════════
+class GradientFrame(tk.Canvas):
+    """Horizontal gradient background"""
+    def __init__(self, parent, c1, c2, height=4, **kw):
+        super().__init__(parent, height=height, highlightthickness=0, **kw)
+        self.c1 = c1; self.c2 = c2
+        self.bind("<Configure>", self._draw)
+    def _draw(self, e=None):
+        self.delete("all")
+        w = self.winfo_width()
+        h = self.winfo_height()
+        if w < 2: return
+        r1,g1,b1 = self.winfo_rgb(self.c1)
+        r2,g2,b2 = self.winfo_rgb(self.c2)
+        steps = max(w, 1)
+        for i in range(steps):
+            r = int(r1 + (r2-r1)*i/steps) >> 8
+            g = int(g1 + (g2-g1)*i/steps) >> 8
+            b = int(b1 + (b2-b1)*i/steps) >> 8
+            self.create_line(i, 0, i, h, fill=f"#{r:02x}{g:02x}{b:02x}")
+
+
+# ══════════════════════════════════════════════════════════════
+#  GITHUB ENGINE
 # ══════════════════════════════════════════════════════════════
 class GitHubEngine:
-    SKIP = {
-        '.git', '__pycache__', 'node_modules', '.DS_Store',
-        'Thumbs.db', '.env', '.vscode', '.idea', 'dist', 'build',
-        '.pytest_cache', 'venv', '.venv', 'env', '.tox',
-        '.mypy_cache', '.eggs'
-    }
-
     def __init__(self, token):
         self.token = token
         self.gh = Github(token, per_page=100)
         self.user = self.gh.get_user()
 
     @property
-    def username(self):
-        return self.user.login
-
-    # ── Repository Operations ──
+    def username(self): return self.user.login
 
     def list_repos(self):
-        result = []
+        out = []
         for r in self.user.get_repos(affiliation="owner", sort="updated"):
-            result.append({
-                "full_name": r.full_name,
-                "name": r.name,
-                "private": r.private,
-                "description": r.description or "",
-                "default_branch": r.default_branch,
-                "url": r.html_url
-            })
-        return result
+            out.append({"full_name":r.full_name,"name":r.name,
+                        "private":r.private,"description":r.description or "",
+                        "default_branch":r.default_branch,"url":r.html_url,
+                        "stars":r.stargazers_count,"lang":r.language or ""})
+        return out
 
-    def create_repo(self, name, description="", private=False):
-        return self.user.create_repo(
-            name=name, description=description,
-            private=private, auto_init=True
-        )
+    def create_repo(self, name, desc="", private=False):
+        return self.user.create_repo(name=name, description=desc,
+                                     private=private, auto_init=True)
 
     def delete_repo(self, full_name):
-        repo = self.gh.get_repo(full_name)
-        repo.delete()
-
-    def get_repo(self, full_name):
-        return self.gh.get_repo(full_name)
-
-    # ── Branch Operations ──
+        self.gh.get_repo(full_name).delete()
 
     def list_branches(self, full_name):
-        repo = self.gh.get_repo(full_name)
-        return [b.name for b in repo.get_branches()]
+        return [b.name for b in self.gh.get_repo(full_name).get_branches()]
 
-    def create_branch(self, full_name, new_branch, source_branch="main"):
+    def create_branch(self, full_name, new_br, src="main"):
         repo = self.gh.get_repo(full_name)
-        source = repo.get_branch(source_branch)
-        repo.create_git_ref(
-            ref=f"refs/heads/{new_branch}",
-            sha=source.commit.sha
+        sha  = repo.get_branch(src).commit.sha
+        repo.create_git_ref(ref=f"refs/heads/{new_br}", sha=sha)
+
+    def create_folder(self, full_name, folder_path, branch, commit_msg):
+        """Create a folder by adding a .gitkeep file inside it"""
+        repo = self.gh.get_repo(full_name)
+        keep_path = folder_path.rstrip("/") + "/.gitkeep"
+        repo.create_file(
+            path=keep_path,
+            message=commit_msg,
+            content=b"",
+            branch=branch
         )
-
-    # ── File Operations ──
 
     def list_remote_files(self, full_name, branch):
-        """Get all files in remote repo"""
         repo = self.gh.get_repo(full_name)
         files = []
-        try:
-            self._recurse_remote(repo, "", branch, files)
-        except Exception:
-            pass
+        self._recurse(repo, "", branch, files)
         return files
 
-    def _recurse_remote(self, repo, path, branch, result):
+    def _recurse(self, repo, path, branch, result):
         try:
-            contents = repo.get_contents(path, ref=branch)
-            if not isinstance(contents, list):
-                contents = [contents]
-            for c in contents:
+            items = repo.get_contents(path, ref=branch)
+            if not isinstance(items, list): items = [items]
+            for c in items:
                 if c.type == "dir":
-                    self._recurse_remote(repo, c.path, branch, result)
+                    self._recurse(repo, c.path, branch, result)
                 else:
-                    result.append({
-                        "path": c.path,
-                        "sha": c.sha,
-                        "size": c.size,
-                        "download_url": c.download_url
-                    })
-        except Exception:
-            pass
+                    result.append({"path":c.path,"sha":c.sha,
+                                   "size":c.size,"url":c.download_url})
+        except: pass
 
-    def get_file_content(self, full_name, file_path, branch):
-        """Get content of a single file"""
+    def get_file(self, full_name, path, branch):
         repo = self.gh.get_repo(full_name)
-        content = repo.get_contents(file_path, ref=branch)
-        return content.decoded_content.decode("utf-8", errors="replace"), content.sha
+        c = repo.get_contents(path, ref=branch)
+        return c.decoded_content.decode("utf-8", errors="replace"), c.sha
 
-    def update_single_file(self, full_name, file_path, new_content, 
-                           sha, branch, commit_msg):
-        """Update a single file in repo"""
+    def update_file(self, full_name, path, content, sha, branch, msg):
         repo = self.gh.get_repo(full_name)
-        if isinstance(new_content, str):
-            new_content = new_content.encode("utf-8")
-        repo.update_file(
-            path=file_path,
-            message=commit_msg,
-            content=new_content,
-            sha=sha,
-            branch=branch
-        )
+        if isinstance(content, str): content = content.encode()
+        repo.update_file(path=path, message=msg, content=content,
+                        sha=sha, branch=branch)
 
-    def create_single_file(self, full_name, file_path, content, branch, commit_msg):
-        """Create a new single file"""
+    def create_file(self, full_name, path, content, branch, msg):
         repo = self.gh.get_repo(full_name)
-        if isinstance(content, str):
-            content = content.encode("utf-8")
-        repo.create_file(
-            path=file_path,
-            message=commit_msg,
-            content=content,
-            branch=branch
-        )
+        if isinstance(content, str): content = content.encode()
+        repo.create_file(path=path, message=msg, content=content, branch=branch)
 
-    def delete_file(self, full_name, file_path, sha, branch, commit_msg):
-        """Delete a single file from repo"""
-        repo = self.gh.get_repo(full_name)
-        repo.delete_file(
-            path=file_path,
-            message=commit_msg,
-            sha=sha,
-            branch=branch
-        )
+    def delete_file(self, full_name, path, sha, branch, msg):
+        self.gh.get_repo(full_name).delete_file(
+            path=path, message=msg, sha=sha, branch=branch)
 
-    # ── Folder Upload ──
+    def get_sha_map(self, full_name, branch):
+        return {f["path"]: f["sha"] for f in self.list_remote_files(full_name, branch)}
 
-    def should_skip(self, name):
-        return name in self.SKIP
+    def scan_items(self, items):
+        """
+        Scan list of dropped items (files, folders, zips).
+        Returns list of dicts with full_path, rel_path, size, ext.
+        """
+        result = []
+        temp_dirs = []
 
-    def scan_folder(self, folder_path):
-        files = []
-        folder_path = os.path.abspath(folder_path)
-        for root, dirs, filenames in os.walk(folder_path):
-            dirs[:] = [d for d in dirs if not self.should_skip(d)]
-            for f in filenames:
-                if self.should_skip(f):
-                    continue
-                fp = os.path.join(root, f)
-                rel = os.path.relpath(fp, folder_path).replace("\\", "/")
+        for item_path in items:
+            item_path = item_path.strip().strip("{}\"'")
+            if not os.path.exists(item_path):
+                continue
+
+            if os.path.isdir(item_path):
+                folder_name = os.path.basename(item_path)
+                self._scan_dir(item_path, folder_name, result)
+
+            elif item_path.lower().endswith(".zip"):
+                # Extract zip to temp and scan
+                tmp = tempfile.mkdtemp()
+                temp_dirs.append(tmp)
+                try:
+                    with zipfile.ZipFile(item_path, 'r') as zf:
+                        zf.extractall(tmp)
+                    zip_name = os.path.splitext(os.path.basename(item_path))[0]
+                    self._scan_dir(tmp, zip_name, result)
+                except Exception:
+                    pass
+
+            elif os.path.isfile(item_path):
+                fname = os.path.basename(item_path)
+                try:
+                    size = os.path.getsize(item_path)
+                except OSError:
+                    size = 0
+                result.append({
+                    "full_path": item_path,
+                    "rel_path":  fname,
+                    "size":      size,
+                    "ext":       os.path.splitext(fname)[1].lower() or ".file",
+                    "temp_dirs": temp_dirs
+                })
+
+        # Attach temp_dirs reference to first item for cleanup
+        for r in result:
+            r["_temp_dirs"] = temp_dirs
+
+        return result
+
+    def _scan_dir(self, base_path, prefix, result):
+        for root, dirs, files in os.walk(base_path):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            for fname in files:
+                if fname in SKIP_DIRS: continue
+                fp  = os.path.join(root, fname)
+                rel = os.path.relpath(fp, os.path.dirname(base_path))
+                rel = rel.replace("\\", "/")
                 try:
                     size = os.path.getsize(fp)
                 except OSError:
                     size = 0
-                files.append({
+                result.append({
                     "full_path": fp,
-                    "rel_path": rel,
-                    "size": size,
-                    "ext": os.path.splitext(f)[1].lower() or ".file"
+                    "rel_path":  rel,
+                    "size":      size,
+                    "ext":       os.path.splitext(fname)[1].lower() or ".file"
                 })
-        return files
 
-    def upload_folder(self, full_name, folder_path, branch="main",
-                      commit_msg="Upload files", callback=None):
-        repo = self.gh.get_repo(full_name)
-        files = self.scan_folder(folder_path)
-        total = len(files)
+    def upload_items(self, full_name, items, branch="main",
+                     commit_msg="Upload", target_folder="", callback=None):
+        repo     = self.gh.get_repo(full_name)
+        sha_map  = self.get_sha_map(full_name, branch)
+        total    = len(items)
+        uploaded = 0; total_bytes = 0; errors = []
+        t0       = time.time()
 
-        if callback:
-            callback("start", {"total": total})
+        if callback: callback("start", {"total": total})
 
-        # Get existing SHA map
-        sha_map = {}
-        remote_files = self.list_remote_files(full_name, branch)
-        for rf in remote_files:
-            sha_map[rf["path"]] = rf["sha"]
-
-        uploaded = 0
-        total_bytes = 0
-        errors = []
-        start_time = time.time()
-
-        for i, f in enumerate(files):
+        for i, f in enumerate(items):
             rel = f["rel_path"]
+            if target_folder:
+                rel = target_folder.strip("/") + "/" + rel
+
             try:
-                with open(f["full_path"], "rb") as stream:
-                    content = stream.read()
+                with open(f["full_path"], "rb") as fh:
+                    content = fh.read()
 
                 if callback:
-                    callback("uploading", {
-                        "file": rel, "index": i + 1,
-                        "total": total, "size": f["size"]
-                    })
+                    callback("uploading", {"file": rel, "index": i+1,
+                                           "total": total, "size": f["size"]})
 
                 if rel in sha_map:
-                    repo.update_file(
-                        path=rel,
-                        message=f"{commit_msg} - update {rel}",
-                        content=content,
-                        sha=sha_map[rel],
-                        branch=branch
-                    )
+                    repo.update_file(path=rel,
+                                    message=f"{commit_msg} - update {rel}",
+                                    content=content, sha=sha_map[rel],
+                                    branch=branch)
                 else:
-                    repo.create_file(
-                        path=rel,
-                        message=f"{commit_msg} - add {rel}",
-                        content=content,
-                        branch=branch
-                    )
+                    repo.create_file(path=rel,
+                                    message=f"{commit_msg} - add {rel}",
+                                    content=content, branch=branch)
 
-                uploaded += 1
+                uploaded    += 1
                 total_bytes += f["size"]
-
-                elapsed = time.time() - start_time
-                speed = total_bytes / elapsed if elapsed > 0 else 0
+                elapsed      = time.time() - t0
+                speed        = total_bytes / elapsed if elapsed > 0 else 0
 
                 if callback:
-                    callback("progress", {
-                        "file": rel, "uploaded": uploaded,
-                        "total": total, "bytes": total_bytes,
-                        "speed": speed
-                    })
+                    callback("progress", {"file": rel, "uploaded": uploaded,
+                                          "total": total, "bytes": total_bytes,
+                                          "speed": speed})
 
             except Exception as e:
-                err_msg = str(e)
-                errors.append({"file": rel, "error": err_msg})
+                errors.append({"file": rel, "error": str(e)})
                 if callback:
-                    callback("file_error", {
-                        "file": rel, "error": err_msg,
-                        "uploaded": uploaded, "total": total
-                    })
+                    callback("file_error", {"file": rel, "error": str(e)})
 
-        elapsed = time.time() - start_time
+        elapsed = time.time() - t0
         if callback:
-            callback("done", {
-                "uploaded": uploaded, "total": total,
-                "bytes": total_bytes, "errors": errors,
-                "elapsed": elapsed
-            })
-
+            callback("done", {"uploaded": uploaded, "total": total,
+                              "bytes": total_bytes, "errors": errors,
+                              "elapsed": elapsed})
         return uploaded, total, errors
 
 
 # ══════════════════════════════════════════════════════════════
-#  FILE ICONS
-# ══════════════════════════════════════════════════════════════
-ICONS = {
-    '.py': '🐍', '.js': '⚡', '.ts': '💎', '.html': '🌐', '.css': '🎨',
-    '.json': '📋', '.md': '📝', '.txt': '📄', '.yml': '⚙️', '.yaml': '⚙️',
-    '.xml': '📰', '.sql': '🗃️', '.sh': '🖥️', '.bat': '🖥️',
-    '.png': '🖼️', '.jpg': '🖼️', '.jpeg': '🖼️', '.gif': '🖼️', '.svg': '🎨',
-    '.zip': '📦', '.rar': '📦', '.tar': '📦', '.gz': '📦',
-    '.java': '☕', '.cpp': '⚙️', '.c': '⚙️', '.go': '🔵', '.rs': '🦀',
-    '.php': '🐘', '.dart': '🎯', '.vue': '💚', '.jsx': '⚛️', '.tsx': '⚛️',
-    '.rb': '💎', '.swift': '🍎', '.kt': '🟣', '.r': '📊',
-    '.toml': '⚙️', '.ini': '⚙️', '.lock': '🔒', '.env': '🔒',
-    '.dockerfile': '🐳', '.gitignore': '🚫',
-}
-
-def icon_for(ext):
-    return ICONS.get(ext.lower(), "📄")
-
-def fmt_size(b):
-    if b < 1024: return f"{b} B"
-    if b < 1024 * 1024: return f"{b/1024:.1f} KB"
-    return f"{b/(1024*1024):.1f} MB"
-
-def fmt_time(s):
-    if s < 60: return f"{s:.1f}s"
-    return f"{s/60:.1f}min"
-
-
-# ══════════════════════════════════════════════════════════════
-#  MAIN APPLICATION
+#  MAIN APPLICATION  — LANDSCAPE LAYOUT
 # ══════════════════════════════════════════════════════════════
 class App:
 
-    # GitHub Dark Theme Colors
-    C = {
-        "bg": "#0d1117",
-        "card": "#161b22",
-        "input": "#090d13",
-        "border": "#30363d",
-        "border_hi": "#484f58",
-        "text": "#f0f6fc",
-        "sub": "#8b949e",
-        "muted": "#6e7681",
-        "green": "#238636",
-        "green2": "#2ea043",
-        "blue": "#1f6feb",
-        "blue2": "#388bfd",
-        "purple": "#8957e5",
-        "orange": "#d29922",
-        "red": "#f85149",
-        "cyan": "#3fb950",
-    }
-
     def __init__(self):
-        # State
-        self.engine = None
-        self.selected_folder = None
-        self.scanned_files = []
-        self.repos = []
-        self.remote_files = []
-        self.is_uploading = False
-        self.config = self._load_config()
+        self.engine          = None
+        self.repos           = []
+        self.remote_files    = []
+        self.drop_items      = []   # list of file/folder paths dropped
+        self.scanned_files   = []   # expanded file list
+        self.is_uploading    = False
+        self.config          = self._load_cfg()
 
-        # Window
+        # ── Window ──
         if DND_AVAILABLE:
             self.root = TkinterDnD.Tk()
         else:
             self.root = tk.Tk()
 
-        self.root.title("GitHub Folder Uploader Pro v3.0")
-        self.root.geometry("920x920")
-        self.root.minsize(800, 700)
-        self.root.configure(bg=self.C["bg"])
+        self.root.title("GitHub Uploader Pro  ·  v4.0 Ultra")
+        self.root.geometry("1200x750")
+        self.root.minsize(1000, 650)
+        self.root.configure(bg=C["bg"])
+        self.root.resizable(True, True)
 
-        self._setup_styles()
-        self._build_ui()
-        self._load_saved_token()
+        self._styles()
+        self._build()
+        self._load_token()
 
         self.root.mainloop()
 
     # ── Config ──
-
-    def _load_config(self):
+    def _load_cfg(self):
         try:
-            with open(CONFIG_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            return {}
+            with open(CONFIG_FILE) as f: return json.load(f)
+        except: return {}
 
-    def _save_config(self):
+    def _save_cfg(self):
         try:
-            with open(CONFIG_FILE, "w") as f:
-                json.dump(self.config, f)
-        except Exception:
-            pass
+            with open(CONFIG_FILE, "w") as f: json.dump(self.config, f)
+        except: pass
 
-    def _load_saved_token(self):
-        t = self.config.get("token", "")
-        if t:
-            self.token_entry.insert(0, t)
+    def _load_token(self):
+        t = self.config.get("token","")
+        if t: self.ent_token.insert(0, t)
 
     # ── TTK Styles ──
-
-    def _setup_styles(self):
+    def _styles(self):
         s = ttk.Style()
         s.theme_use("clam")
-        s.configure("TCombobox",
-                    fieldbackground=self.C["input"],
-                    background=self.C["border"],
-                    foreground=self.C["text"],
-                    arrowcolor=self.C["text"])
-        s.map("TCombobox",
-              fieldbackground=[("readonly", self.C["input"])],
-              foreground=[("readonly", self.C["text"])])
+        for widget in ("TCombobox", "TEntry"):
+            s.configure(widget,
+                fieldbackground=C["input"], background=C["border"],
+                foreground=C["text"], insertcolor=C["text"],
+                arrowcolor=C["blue3"], selectbackground=C["blue2"],
+                selectforeground=C["text"], darkcolor=C["input"],
+                lightcolor=C["input"], bordercolor=C["border"],
+                relief="flat")
+            s.map(widget,
+                fieldbackground=[("readonly",C["input"])],
+                foreground=[("readonly",C["text"])])
         s.configure("Treeview",
-                    background=self.C["input"],
-                    foreground=self.C["text"],
-                    fieldbackground=self.C["input"],
-                    borderwidth=0,
-                    font=("Consolas", 9))
-        s.map("Treeview", background=[("selected", self.C["blue"])])
+            background=C["input"], foreground=C["text"],
+            fieldbackground=C["input"], borderwidth=0,
+            font=("Consolas",9), rowheight=22)
+        s.map("Treeview", background=[("selected",C["blue2"])])
         s.configure("Treeview.Heading",
-                    background=self.C["border"],
-                    foreground=self.C["text"],
-                    font=("Segoe UI", 9, "bold"))
-
-    # ── Helpers ──
-
-    def _card(self, parent, title=""):
-        outer = tk.Frame(parent, bg=self.C["border"])
-        outer.pack(fill="x", pady=(0, 12))
-        inner = tk.Frame(outer, bg=self.C["card"], padx=16, pady=12)
-        inner.pack(fill="x", padx=1, pady=1)
-        if title:
-            tk.Label(inner, text=title, font=("Segoe UI", 10, "bold"),
-                    bg=self.C["card"], fg=self.C["text"]).pack(anchor="w", pady=(0, 8))
-        return inner, outer
-
-    def _btn(self, parent, text, color, command, **kw):
-        b = tk.Button(parent, text=text, bg=color, fg="#ffffff",
-                     font=("Segoe UI", 10, "bold"), relief="flat",
-                     padx=14, pady=6, cursor="hand2",
-                     activebackground=color, activeforeground="#ffffff",
-                     command=command, **kw)
-        return b
-
-    def _log(self, msg, tag="muted"):
-        ts = datetime.now().strftime("%H:%M:%S")
-        self.log_box.insert("end", f"[{ts}] ", "muted")
-        self.log_box.insert("end", f"{msg}\n", tag)
-        self.log_box.see("end")
+            background=C["card2"], foreground=C["blue3"],
+            font=("Segoe UI",9,"bold"), relief="flat")
+        s.configure("Vertical.TScrollbar",
+            background=C["border"], troughcolor=C["bg2"],
+            arrowcolor=C["sub"], bordercolor=C["bg"])
+        s.configure("Horizontal.TScrollbar",
+            background=C["border"], troughcolor=C["bg2"],
+            arrowcolor=C["sub"])
 
     # ══════════════════════════════════════════════════════
-    #  BUILD UI
+    #  BUILD LAYOUT
     # ══════════════════════════════════════════════════════
+    def _build(self):
+        # Top gradient accent bar
+        GradientFrame(self.root, C["blue5"], C["cyan"],
+                      height=3, bg=C["bg"]).pack(fill="x")
 
-    def _build_ui(self):
-        # Scrollable
-        canvas = tk.Canvas(self.root, bg=self.C["bg"], highlightthickness=0)
-        vsb = tk.Scrollbar(self.root, orient="vertical", command=canvas.yview)
-        container = tk.Frame(canvas, bg=self.C["bg"])
-        container.bind("<Configure>",
-                      lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=container, anchor="nw")
-        canvas.configure(yscrollcommand=vsb.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
+        # ── MAIN HORIZONTAL PANES ──
+        main = tk.Frame(self.root, bg=C["bg"])
+        main.pack(fill="both", expand=True)
 
-        def _scroll(e):
-            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-        self.root.bind_all("<MouseWheel>", _scroll)
+        # LEFT SIDEBAR
+        self._sidebar = tk.Frame(main, bg=C["sidebar"], width=280)
+        self._sidebar.pack(side="left", fill="y")
+        self._sidebar.pack_propagate(False)
+        self._build_sidebar()
 
-        # Resize canvas window width
-        def _resize(e):
-            canvas.itemconfig(canvas.find_all()[0], width=e.width)
-        canvas.bind("<Configure>", _resize)
+        # Vertical divider
+        tk.Frame(main, bg=C["border"], width=1).pack(side="left", fill="y")
 
-        pad = tk.Frame(container, bg=self.C["bg"], padx=25, pady=18)
-        pad.pack(fill="both", expand=True)
+        # RIGHT CONTENT
+        right = tk.Frame(main, bg=C["bg"])
+        right.pack(side="left", fill="both", expand=True)
+        self._build_right(right)
 
-        # ── HEADER ──
-        hdr = tk.Frame(pad, bg=self.C["bg"])
-        hdr.pack(fill="x", pady=(0, 18))
+    # ══════════════════════════════════════════════════════
+    #  SIDEBAR
+    # ══════════════════════════════════════════════════════
+    def _build_sidebar(self):
+        sb = self._sidebar
 
-        tk.Label(hdr, text="🚀 GitHub Folder Uploader",
-                font=("Segoe UI", 20, "bold"),
-                bg=self.C["bg"], fg="#ffffff").pack(side="left")
+        # Logo area
+        logo_f = tk.Frame(sb, bg=C["sidebar"])
+        logo_f.pack(fill="x", pady=(16,8))
 
-        badge_f = tk.Frame(hdr, bg=self.C["bg"])
-        badge_f.pack(side="right")
-        tk.Label(badge_f, text=" v3.0 FULL ", bg=self.C["purple"],
-                fg="#fff", font=("Segoe UI", 8, "bold"),
-                padx=8, pady=2).pack()
+        logo_c = tk.Canvas(logo_f, width=44, height=44,
+                          bg=C["sidebar"], highlightthickness=0)
+        logo_c.pack(side="left", padx=(14,8))
+        # Draw circle gradient logo
+        logo_c.create_oval(2,2,42,42, fill=C["blue2"], outline=C["blue3"], width=2)
+        logo_c.create_text(22,22, text="⬆", fill=C["cyan"],
+                          font=("Segoe UI",18,"bold"))
 
-        tk.Label(pad, text="Upload • Edit • Delete • Create Repo • Manage Branch • Drag & Drop",
-                font=("Segoe UI", 10), bg=self.C["bg"],
-                fg=self.C["sub"]).pack(anchor="w", pady=(0, 15))
+        tf = tk.Frame(logo_f, bg=C["sidebar"])
+        tf.pack(side="left")
+        tk.Label(tf, text="GitHub", font=("Segoe UI",13,"bold"),
+                bg=C["sidebar"], fg=C["text"]).pack(anchor="w")
+        tk.Label(tf, text="Uploader Pro", font=("Segoe UI",8),
+                bg=C["sidebar"], fg=C["sub"]).pack(anchor="w")
 
-        # ── 1. AUTH CARD ──
-        auth, _ = self._card(pad, "🔑  STEP 1: CONNECT GITHUB")
+        tk.Label(sb, text=" v4.0 ULTRA", bg=C["purple"], fg="#fff",
+                font=("Segoe UI",7,"bold"), padx=6, pady=2).pack(pady=(0,4))
 
-        auth_row = tk.Frame(auth, bg=self.C["card"])
-        auth_row.pack(fill="x")
+        GradientFrame(sb, C["blue5"], C["cyan"],
+                      height=2, bg=C["sidebar"]).pack(fill="x", pady=(0,12))
 
-        # Token Input
-        inp_wrap = tk.Frame(auth_row, bg=self.C["border"])
-        inp_wrap.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        inp_inner = tk.Frame(inp_wrap, bg=self.C["input"])
-        inp_inner.pack(fill="x", padx=1, pady=1)
+        # ── 1. AUTH ──
+        self._sb_section(sb, "🔑  AUTHENTICATION")
 
-        tk.Label(inp_inner, text="🔑", bg=self.C["input"],
-                font=("Segoe UI", 11)).pack(side="left", padx=(8, 4))
-
-        self.token_entry = tk.Entry(inp_inner, show="•", font=("Consolas", 11),
-                                   bg=self.C["input"], fg=self.C["text"],
-                                   insertbackground=self.C["text"],
-                                   relief="flat", bd=7)
-        self.token_entry.pack(side="left", fill="x", expand=True)
-
-        self.show_pw = False
-        eye = tk.Label(inp_inner, text="👁", bg=self.C["input"],
-                      font=("Segoe UI", 11), cursor="hand2")
-        eye.pack(side="right", padx=8)
+        tok_wrap = tk.Frame(sb, bg=C["border"])
+        tok_wrap.pack(fill="x", padx=12, pady=(4,0))
+        tok_in = tk.Frame(tok_wrap, bg=C["input"])
+        tok_in.pack(fill="x", padx=1, pady=1)
+        tk.Label(tok_in, text="🔑", bg=C["input"],
+                font=("Segoe UI",10)).pack(side="left", padx=(6,3))
+        self.ent_token = tk.Entry(tok_in, show="•", font=("Consolas",10),
+                                  bg=C["input"], fg=C["text"],
+                                  insertbackground=C["text"], relief="flat", bd=5)
+        self.ent_token.pack(side="left", fill="x", expand=True)
+        eye = tk.Label(tok_in, text="👁", bg=C["input"],
+                      font=("Segoe UI",10), cursor="hand2")
+        eye.pack(side="right", padx=6)
         eye.bind("<Button-1>", self._toggle_pw)
 
-        self.btn_conn = self._btn(auth_row, "Connect", self.C["green"],
-                                 self.do_connect)
-        self.btn_conn.pack(side="right")
+        self.btn_conn = self._btn(sb, "⚡  Connect to GitHub",
+                                 C["blue1"], self.do_connect,
+                                 padx=12, pady=8)
+        self.btn_conn.pack(fill="x", padx=12, pady=(8,4))
 
-        # Status + help
-        status_row = tk.Frame(auth, bg=self.C["card"])
-        status_row.pack(fill="x", pady=(8, 0))
+        self.lbl_status = tk.Label(sb, text="⚪ Not connected",
+                                   font=("Segoe UI",9),
+                                   bg=C["sidebar"], fg=C["muted"])
+        self.lbl_status.pack(pady=(0,4))
 
-        self.lbl_status = tk.Label(status_row, text="⚪ Belum terhubung",
-                                  font=("Segoe UI", 9), bg=self.C["card"],
-                                  fg=self.C["muted"])
-        self.lbl_status.pack(side="left")
-
-        link = tk.Label(status_row, text="Buat token baru →",
-                       font=("Segoe UI", 9, "underline"),
-                       bg=self.C["card"], fg=self.C["blue"], cursor="hand2")
-        link.pack(side="right")
+        link = tk.Label(sb, text="Create token →",
+                       font=("Segoe UI",8,"underline"),
+                       bg=C["sidebar"], fg=C["blue3"], cursor="hand2")
+        link.pack()
         link.bind("<Button-1>", lambda e: webbrowser.open(
-            "https://github.com/settings/tokens/new?scopes=repo,delete_repo&description=UploaderProV3"))
+            "https://github.com/settings/tokens/new?scopes=repo,delete_repo"))
 
-        # ── 2. DROP ZONE ──
-        self.drop_outer = tk.Frame(pad, bg=self.C["border"])
-        self.drop_outer.pack(fill="x", pady=(0, 12))
+        GradientFrame(sb, C["blue5"], C["purple"],
+                      height=1, bg=C["sidebar"]).pack(fill="x", padx=12, pady=10)
 
-        self.drop_box = tk.Frame(self.drop_outer, bg=self.C["card"],
-                                cursor="hand2")
-        self.drop_box.pack(fill="x", padx=2, pady=2)
+        # ── 2. REPO ──
+        self._sb_section(sb, "📦  REPOSITORY")
 
-        drop_pad = tk.Frame(self.drop_box, bg=self.C["card"], padx=20, pady=28)
-        drop_pad.pack(fill="x")
+        self.repo_var = tk.StringVar()
+        self.repo_combo = ttk.Combobox(sb, textvariable=self.repo_var,
+                                       state="readonly", font=("Segoe UI",9))
+        self.repo_combo.pack(fill="x", padx=12, pady=(4,2))
+        self.repo_combo.bind("<<ComboboxSelected>>", self._on_repo_sel)
 
-        self.lbl_drop_icon = tk.Label(drop_pad, text="📂",
-                                     font=("Segoe UI", 40),
-                                     bg=self.C["card"])
-        self.lbl_drop_icon.pack()
+        repo_btn_row = tk.Frame(sb, bg=C["sidebar"])
+        repo_btn_row.pack(fill="x", padx=12, pady=(4,4))
 
-        self.lbl_drop_title = tk.Label(drop_pad, text="STEP 2: Drop Folder Disini",
-                                      font=("Segoe UI", 14, "bold"),
-                                      bg=self.C["card"], fg=self.C["text"])
-        self.lbl_drop_title.pack(pady=(8, 3))
+        self._btn(repo_btn_row, "🔄", C["border"], self.do_refresh_repos,
+                 padx=8, pady=5).pack(side="left", padx=(0,4))
+        self._btn(repo_btn_row, "➕ New Repo", C["blue2"],
+                 self.do_create_repo, padx=8, pady=5).pack(side="left")
 
-        self.lbl_drop_info = tk.Label(drop_pad,
-                                     text="Klik atau drag & drop folder yang ingin di-upload",
-                                     font=("Segoe UI", 10),
-                                     bg=self.C["card"], fg=self.C["sub"])
-        self.lbl_drop_info.pack()
+        self.lbl_repo_info = tk.Label(sb, text="",
+                                     font=("Segoe UI",8),
+                                     bg=C["sidebar"], fg=C["sub"],
+                                     wraplength=240, justify="left")
+        self.lbl_repo_info.pack(anchor="w", padx=12, pady=(0,4))
 
-        tk.Label(drop_pad,
-                text="Auto-skip: .git, node_modules, __pycache__, venv, dist, build, dll",
-                font=("Segoe UI", 8), bg=self.C["card"],
-                fg=self.C["muted"]).pack(pady=(8, 0))
+        # New repo name
+        nr_wrap = tk.Frame(sb, bg=C["border"])
+        nr_wrap.pack(fill="x", padx=12, pady=(2,0))
+        nr_in = tk.Frame(nr_wrap, bg=C["input"])
+        nr_in.pack(fill="x", padx=1, pady=1)
+        self.ent_newrepo = tk.Entry(nr_in, font=("Segoe UI",9),
+                                    bg=C["input"], fg=C["sub"],
+                                    insertbackground=C["text"],
+                                    relief="flat", bd=5)
+        self.ent_newrepo.pack(side="left", fill="x", expand=True)
+        self.ent_newrepo.insert(0, "repo-name")
+        self.ent_newrepo.bind("<FocusIn>", lambda e:(
+            self.ent_newrepo.delete(0,"end")
+            if self.ent_newrepo.get()=="repo-name" else None))
 
-        self.badge_frame = tk.Frame(drop_pad, bg=self.C["card"])
+        self.priv_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(nr_in, text="🔒", variable=self.priv_var,
+                      bg=C["input"], fg=C["sub"],
+                      selectcolor=C["border"],
+                      activebackground=C["input"],
+                      font=("Segoe UI",9)).pack(side="right", padx=4)
 
-        # Browse button
-        self._btn(drop_pad, "📁 Browse Folder", self.C["border"],
-                 self.browse_folder).pack(pady=(12, 0))
+        GradientFrame(sb, C["purple"], C["blue5"],
+                      height=1, bg=C["sidebar"]).pack(fill="x", padx=12, pady=10)
 
-        # Click to browse
-        for w in [self.drop_box, drop_pad, self.lbl_drop_icon,
-                  self.lbl_drop_title, self.lbl_drop_info]:
-            w.bind("<Button-1>", lambda e: self.browse_folder())
+        # ── 3. BRANCH & COMMIT ──
+        self._sb_section(sb, "🌿  BRANCH & COMMIT")
+
+        # Branch
+        br_row = tk.Frame(sb, bg=C["sidebar"])
+        br_row.pack(fill="x", padx=12, pady=(4,4))
+
+        self.branch_combo = ttk.Combobox(br_row, font=("Segoe UI",9), width=12)
+        self.branch_combo.pack(side="left", fill="x", expand=True, padx=(0,4))
+        self.branch_combo.set("main")
+
+        self._btn(br_row, "🌿+", C["border"],
+                 self.do_create_branch, padx=6, pady=4).pack(side="right")
+
+        # Target folder
+        tf_wrap = tk.Frame(sb, bg=C["border"])
+        tf_wrap.pack(fill="x", padx=12, pady=(0,4))
+        tf_in = tk.Frame(tf_wrap, bg=C["input"])
+        tf_in.pack(fill="x", padx=1, pady=1)
+        tk.Label(tf_in, text="📁", bg=C["input"],
+                font=("Segoe UI",9)).pack(side="left", padx=(6,2))
+        self.ent_target = tk.Entry(tf_in, font=("Segoe UI",9),
+                                   bg=C["input"], fg=C["sub"],
+                                   insertbackground=C["text"],
+                                   relief="flat", bd=4)
+        self.ent_target.pack(fill="x", expand=True)
+        self.ent_target.insert(0, "target/folder (optional)")
+        self.ent_target.bind("<FocusIn>", lambda e:(
+            self.ent_target.delete(0,"end")
+            if "optional" in self.ent_target.get() else None))
+
+        # Commit msg
+        cm_wrap = tk.Frame(sb, bg=C["border"])
+        cm_wrap.pack(fill="x", padx=12, pady=(0,4))
+        cm_in = tk.Frame(cm_wrap, bg=C["input"])
+        cm_in.pack(fill="x", padx=1, pady=1)
+        tk.Label(cm_in, text="💬", bg=C["input"],
+                font=("Segoe UI",9)).pack(side="left", padx=(6,2))
+        self.ent_commit = tk.Entry(cm_in, font=("Segoe UI",9),
+                                   bg=C["input"], fg=C["text"],
+                                   insertbackground=C["text"],
+                                   relief="flat", bd=4)
+        self.ent_commit.pack(fill="x", expand=True)
+        self.ent_commit.insert(0, "Upload via GitHub Uploader Pro 🚀")
+
+        # Spacer
+        tk.Frame(sb, bg=C["sidebar"]).pack(fill="y", expand=True)
+
+        GradientFrame(sb, C["cyan"], C["blue5"],
+                      height=1, bg=C["sidebar"]).pack(fill="x", padx=12, pady=(0,8))
+
+        tk.Label(sb, text="GitHub Uploader Pro v4.0",
+                font=("Segoe UI",7), bg=C["sidebar"],
+                fg=C["muted"]).pack(pady=(0,8))
+
+    def _sb_section(self, parent, title):
+        f = tk.Frame(parent, bg=C["sidebar"])
+        f.pack(fill="x", padx=12, pady=(8,4))
+        tk.Label(f, text=title, font=("Segoe UI",9,"bold"),
+                bg=C["sidebar"], fg=C["blue3"]).pack(anchor="w")
+
+    # ══════════════════════════════════════════════════════
+    #  RIGHT PANEL — TABBED
+    # ══════════════════════════════════════════════════════
+    def _build_right(self, parent):
+        # Top bar
+        top = tk.Frame(parent, bg=C["card"], height=50)
+        top.pack(fill="x")
+        top.pack_propagate(False)
+
+        tk.Label(top, text="🚀  GitHub Uploader Pro",
+                font=("Segoe UI",14,"bold"),
+                bg=C["card"], fg=C["text"]).pack(side="left", padx=20, pady=10)
+
+        self.btn_upload = tk.Button(
+            top, text="🚀  UPLOAD TO GITHUB",
+            font=("Segoe UI",11,"bold"),
+            bg=C["blue1"], fg="#fff", relief="flat",
+            padx=24, pady=6, cursor="arrow",
+            state="disabled", disabledforeground=C["muted"],
+            command=self.do_upload
+        )
+        self.btn_upload.pack(side="right", padx=16, pady=8)
+
+        self.btn_mkdir = self._btn(top, "📁 New Folder", C["card2"],
+                                  self.do_create_folder, padx=12, pady=6)
+        self.btn_mkdir.pack(side="right", padx=(0,8), pady=8)
+
+        GradientFrame(parent, C["blue5"], C["cyan"],
+                      height=2, bg=C["bg"]).pack(fill="x")
+
+        # ── NOTEBOOK TABS ──
+        style = ttk.Style()
+        style.configure("Custom.TNotebook",
+                        background=C["bg"], borderwidth=0)
+        style.configure("Custom.TNotebook.Tab",
+                        background=C["card"], foreground=C["sub"],
+                        font=("Segoe UI",10), padding=[16,8],
+                        borderwidth=0)
+        style.map("Custom.TNotebook.Tab",
+                  background=[("selected",C["blue2"]),("active",C["card2"])],
+                  foreground=[("selected",C["text"]),("active",C["blue3"])])
+
+        self.nb = ttk.Notebook(parent, style="Custom.TNotebook")
+        self.nb.pack(fill="both", expand=True, padx=0, pady=0)
+
+        # Tab 1 — Drop Zone
+        t1 = tk.Frame(self.nb, bg=C["bg"])
+        self.nb.add(t1, text="  📂  Drop Zone  ")
+        self._build_drop_tab(t1)
+
+        # Tab 2 — File Browser
+        t2 = tk.Frame(self.nb, bg=C["bg"])
+        self.nb.add(t2, text="  🗂️  Remote Files  ")
+        self._build_browser_tab(t2)
+
+        # Tab 3 — Progress + Log
+        t3 = tk.Frame(self.nb, bg=C["bg"])
+        self.nb.add(t3, text="  📊  Progress & Log  ")
+        self._build_progress_tab(t3)
+
+    # ══════════════════════════════════════════════════════
+    #  TAB 1: DROP ZONE
+    # ══════════════════════════════════════════════════════
+    def _build_drop_tab(self, parent):
+        # Split: left=drop area, right=file list
+        pane = tk.PanedWindow(parent, orient="horizontal",
+                             bg=C["bg"], sashwidth=4,
+                             sashrelief="flat", sashpad=0)
+        pane.pack(fill="both", expand=True, padx=12, pady=12)
+
+        # ── LEFT: Drop Area ──
+        left = tk.Frame(pane, bg=C["bg"])
+        pane.add(left, width=420, minsize=320)
+
+        # Big drop zone
+        self.drop_outer = tk.Frame(left, bg=C["border_hi"], bd=2)
+        self.drop_outer.pack(fill="both", expand=True, pady=(0,8))
+
+        self.drop_zone = tk.Frame(self.drop_outer, bg=C["card"], cursor="hand2")
+        self.drop_zone.pack(fill="both", expand=True, padx=2, pady=2)
+
+        # Animated drop content
+        dz_inner = tk.Frame(self.drop_zone, bg=C["card"])
+        dz_inner.place(relx=0.5, rely=0.5, anchor="center")
+
+        self.lbl_dz_icon = tk.Label(dz_inner, text="📥",
+                                   font=("Segoe UI",56),
+                                   bg=C["card"], fg=C["blue3"])
+        self.lbl_dz_icon.pack()
+
+        self.lbl_dz_title = tk.Label(dz_inner,
+                                    text="Drop Anything Here",
+                                    font=("Segoe UI",16,"bold"),
+                                    bg=C["card"], fg=C["text"])
+        self.lbl_dz_title.pack(pady=(10,4))
+
+        self.lbl_dz_sub = tk.Label(dz_inner,
+            text="Files • Folders • ZIP archives\nImages • Videos • Audio • Code • Documents",
+            font=("Segoe UI",10),
+            bg=C["card"], fg=C["sub"], justify="center")
+        self.lbl_dz_sub.pack()
+
+        GradientFrame(dz_inner, C["blue5"], C["cyan"],
+                      height=2, bg=C["card"]).pack(fill="x", pady=10)
+
+        btn_row = tk.Frame(dz_inner, bg=C["card"])
+        btn_row.pack()
+        self._btn(btn_row, "📁 Folder", C["blue2"],
+                 self.browse_folder, padx=14, pady=7).pack(side="left", padx=4)
+        self._btn(btn_row, "📄 Files", C["blue1"],
+                 self.browse_files, padx=14, pady=7).pack(side="left", padx=4)
+        self._btn(btn_row, "📦 ZIP", C["purple"],
+                 self.browse_zip, padx=14, pady=7).pack(side="left", padx=4)
+
+        if not DND_AVAILABLE:
+            tk.Label(dz_inner,
+                    text="💡 pip install tkinterdnd2  for drag & drop",
+                    font=("Segoe UI",8),
+                    bg=C["card"], fg=C["orange"]).pack(pady=(8,0))
 
         # DnD
         if DND_AVAILABLE:
-            self.drop_box.drop_target_register(DND_FILES)
-            self.drop_box.dnd_bind('<<DropEnter>>', self._dnd_enter)
-            self.drop_box.dnd_bind('<<DropLeave>>', self._dnd_leave)
-            self.drop_box.dnd_bind('<<Drop>>', self._dnd_drop)
+            self.drop_zone.drop_target_register(DND_FILES)
+            self.drop_zone.dnd_bind('<<DropEnter>>', self._dnd_enter)
+            self.drop_zone.dnd_bind('<<DropLeave>>', self._dnd_leave)
+            self.drop_zone.dnd_bind('<<Drop>>', self._dnd_drop)
 
-        # ── 3. REPO CARD ──
-        repo_card, _ = self._card(pad, "📦  STEP 3: PILIH REPOSITORY")
+        # Bind click
+        for w in [self.drop_zone, dz_inner, self.lbl_dz_icon,
+                  self.lbl_dz_title, self.lbl_dz_sub]:
+            w.bind("<Button-1>", lambda e: self.browse_folder())
 
-        # Select existing
-        tk.Label(repo_card, text="Pilih Repository:",
-                font=("Segoe UI", 9), bg=self.C["card"],
-                fg=self.C["sub"]).pack(anchor="w", pady=(0, 4))
+        # Stats row below drop zone
+        self.stats_frame = tk.Frame(left, bg=C["card2"])
+        self.stats_frame.pack(fill="x")
 
-        sel_row = tk.Frame(repo_card, bg=self.C["card"])
-        sel_row.pack(fill="x", pady=(0, 8))
+        self.stat_files = self._stat(self.stats_frame,"Files","0",C["blue3"])
+        self.stat_size  = self._stat(self.stats_frame,"Size","—",C["cyan"])
+        self.stat_types = self._stat(self.stats_frame,"Types","—",C["purple"])
 
-        self.repo_var = tk.StringVar()
-        self.repo_combo = ttk.Combobox(sel_row, textvariable=self.repo_var,
-                                       state="readonly", font=("Segoe UI", 10))
-        self.repo_combo.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self.repo_combo.bind("<<ComboboxSelected>>", self._on_repo_selected)
+        # ── RIGHT: Queued File List ──
+        right = tk.Frame(pane, bg=C["bg"])
+        pane.add(right, minsize=280)
 
-        self._btn(sel_row, "🔄", self.C["border"], self.do_refresh_repos).pack(side="right")
+        # Header
+        rh = tk.Frame(right, bg=C["card2"])
+        rh.pack(fill="x", pady=(0,4))
+        tk.Label(rh, text="📋  Upload Queue",
+                font=("Segoe UI",10,"bold"),
+                bg=C["card2"], fg=C["blue3"]).pack(side="left", padx=12, pady=8)
+        self._btn(rh, "🗑 Clear", C["border"],
+                 self.clear_queue, padx=8, pady=4).pack(side="right", padx=8, pady=6)
 
-        # Repo info label
-        self.lbl_repo_info = tk.Label(repo_card, text="",
-                                     font=("Segoe UI", 9),
-                                     bg=self.C["card"], fg=self.C["sub"])
-        self.lbl_repo_info.pack(anchor="w", pady=(0, 5))
+        # File tree
+        tf = tk.Frame(right, bg=C["bg"])
+        tf.pack(fill="both", expand=True)
 
-        # Divider
-        tk.Frame(repo_card, bg=self.C["border"], height=1).pack(fill="x", pady=8)
+        self.queue_tree = ttk.Treeview(tf,
+                                       columns=("icon","path","size","type"),
+                                       show="headings", height=20,
+                                       selectmode="extended")
+        self.queue_tree.heading("icon", text="")
+        self.queue_tree.heading("path", text="Path")
+        self.queue_tree.heading("size", text="Size")
+        self.queue_tree.heading("type", text="Type")
+        self.queue_tree.column("icon", width=30, anchor="center")
+        self.queue_tree.column("path", width=300)
+        self.queue_tree.column("size", width=80, anchor="e")
+        self.queue_tree.column("type", width=80, anchor="center")
 
-        # Create new repo
-        tk.Label(repo_card, text="➕ Atau buat Repository baru:",
-                font=("Segoe UI", 9), bg=self.C["card"],
-                fg=self.C["sub"]).pack(anchor="w", pady=(0, 4))
+        qs = ttk.Scrollbar(tf, orient="vertical", command=self.queue_tree.yview)
+        self.queue_tree.configure(yscrollcommand=qs.set)
+        qs.pack(side="right", fill="y")
+        self.queue_tree.pack(fill="both", expand=True)
 
-        cr_row = tk.Frame(repo_card, bg=self.C["card"])
-        cr_row.pack(fill="x", pady=(0, 5))
+        # Color tags per type
+        self.queue_tree.tag_configure("image",    foreground="#42a5f5")
+        self.queue_tree.tag_configure("video",    foreground="#ab47bc")
+        self.queue_tree.tag_configure("audio",    foreground="#ef5350")
+        self.queue_tree.tag_configure("archive",  foreground="#ff7043")
+        self.queue_tree.tag_configure("code",     foreground="#66bb6a")
+        self.queue_tree.tag_configure("document", foreground="#ffa726")
+        self.queue_tree.tag_configure("other",    foreground=C["sub"])
 
-        self.new_repo_entry = tk.Entry(cr_row, font=("Segoe UI", 10),
-                                      bg=self.C["input"], fg=self.C["text"],
-                                      insertbackground=self.C["text"],
-                                      relief="flat", bd=6)
-        self.new_repo_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        # Right-click menu
+        self.queue_menu = tk.Menu(self.root, tearoff=0,
+                                 bg=C["card"], fg=C["text"],
+                                 activebackground=C["blue2"])
+        self.queue_menu.add_command(label="🗑️ Remove Selected",
+                                   command=self.remove_selected_from_queue)
+        self.queue_tree.bind("<Button-3>", self._queue_ctx)
 
-        self.priv_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(cr_row, text="🔒Private", variable=self.priv_var,
-                      bg=self.C["card"], fg=self.C["text"],
-                      selectcolor=self.C["input"],
-                      activebackground=self.C["card"],
-                      font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+    # ══════════════════════════════════════════════════════
+    #  TAB 2: REMOTE FILE BROWSER
+    # ══════════════════════════════════════════════════════
+    def _build_browser_tab(self, parent):
+        # Toolbar
+        tb = tk.Frame(parent, bg=C["card2"])
+        tb.pack(fill="x", padx=12, pady=(8,4))
 
-        self._btn(cr_row, "➕ Create", self.C["blue"],
-                 self.do_create_repo).pack(side="right")
+        self._btn(tb, "🔄 Load Files", C["blue2"],
+                 self.do_load_remote, padx=12, pady=6).pack(side="left", padx=(0,4))
+        self._btn(tb, "📝 Edit", C["blue1"],
+                 self.do_edit_file, padx=12, pady=6).pack(side="left", padx=(0,4))
+        self._btn(tb, "🗑️ Delete", C["red"],
+                 self.do_delete_file, padx=12, pady=6).pack(side="left", padx=(0,4))
+        self._btn(tb, "📄 New File", C["green"],
+                 self.do_create_file, padx=12, pady=6).pack(side="left", padx=(0,4))
+        self._btn(tb, "📁 New Folder", C["purple"],
+                 self.do_create_folder, padx=12, pady=6).pack(side="left")
 
-        # Branch & Commit
-        tk.Frame(repo_card, bg=self.C["border"], height=1).pack(fill="x", pady=8)
+        # Search
+        sw = tk.Frame(tb, bg=C["border"])
+        sw.pack(side="right", padx=(0,4))
+        si = tk.Frame(sw, bg=C["input"])
+        si.pack(fill="x", padx=1, pady=1)
+        tk.Label(si, text="🔍", bg=C["input"],
+                font=("Segoe UI",9)).pack(side="left", padx=4)
+        self.ent_search = tk.Entry(si, font=("Segoe UI",9),
+                                   bg=C["input"], fg=C["text"],
+                                   insertbackground=C["text"],
+                                   relief="flat", bd=4, width=20)
+        self.ent_search.pack()
+        self.ent_search.bind("<KeyRelease>", self._filter_remote)
 
-        opt_row = tk.Frame(repo_card, bg=self.C["card"])
-        opt_row.pack(fill="x")
+        # File tree
+        tf = tk.Frame(parent, bg=C["bg"])
+        tf.pack(fill="both", expand=True, padx=12, pady=(0,8))
 
-        # Branch
-        bf = tk.Frame(opt_row, bg=self.C["card"])
-        bf.pack(side="left", padx=(0, 10))
-        tk.Label(bf, text="Branch:", font=("Segoe UI", 9),
-                bg=self.C["card"], fg=self.C["sub"]).pack(anchor="w")
-        self.branch_combo = ttk.Combobox(bf, font=("Segoe UI", 10),
-                                         width=14)
-        self.branch_combo.pack(pady=(2, 0))
-        self.branch_combo.set("main")
+        cols = ("icon","path","size","sha")
+        self.remote_tree = ttk.Treeview(tf, columns=cols,
+                                        show="headings", height=25,
+                                        selectmode="browse")
+        self.remote_tree.heading("icon", text="")
+        self.remote_tree.heading("path", text="📄  File Path")
+        self.remote_tree.heading("size", text="💾 Size")
+        self.remote_tree.heading("sha",  text="SHA")
+        self.remote_tree.column("icon", width=30, anchor="center")
+        self.remote_tree.column("path", width=600)
+        self.remote_tree.column("size", width=100, anchor="e")
+        self.remote_tree.column("sha",  width=80)
 
-        # New branch button
-        self._btn(opt_row, "🌿 New Branch", self.C["border"],
-                 self.do_create_branch).pack(side="left", padx=(0, 12), pady=(15, 0))
+        rs = ttk.Scrollbar(tf, orient="vertical", command=self.remote_tree.yview)
+        self.remote_tree.configure(yscrollcommand=rs.set)
+        rs.pack(side="right", fill="y")
+        self.remote_tree.pack(fill="both", expand=True)
 
-        # Commit message
-        cf = tk.Frame(opt_row, bg=self.C["card"])
-        cf.pack(side="left", fill="x", expand=True)
-        tk.Label(cf, text="Commit Message:", font=("Segoe UI", 9),
-                bg=self.C["card"], fg=self.C["sub"]).pack(anchor="w")
-        self.commit_entry = tk.Entry(cf, font=("Segoe UI", 10),
-                                    bg=self.C["input"], fg=self.C["text"],
-                                    insertbackground=self.C["text"],
-                                    relief="flat", bd=5)
-        self.commit_entry.pack(fill="x", pady=(2, 0))
-        self.commit_entry.insert(0, "Upload via GitHub Uploader Pro 🚀")
+        self.remote_tree.tag_configure("image",    foreground="#42a5f5")
+        self.remote_tree.tag_configure("video",    foreground="#ab47bc")
+        self.remote_tree.tag_configure("audio",    foreground="#ef5350")
+        self.remote_tree.tag_configure("archive",  foreground="#ff7043")
+        self.remote_tree.tag_configure("code",     foreground="#66bb6a")
+        self.remote_tree.tag_configure("document", foreground="#ffa726")
+        self.remote_tree.tag_configure("other",    foreground=C["sub"])
 
-        # ── 4. UPLOAD BUTTON ──
-        self.btn_upload = tk.Button(
-            pad, text="🚀  UPLOAD FOLDER TO GITHUB",
-            font=("Segoe UI", 13, "bold"), bg=self.C["border"],
-            fg=self.C["muted"], relief="flat", pady=14,
-            cursor="arrow", state="disabled",
-            command=self.do_upload
-        )
-        self.btn_upload.pack(fill="x", pady=(5, 12))
+    # ══════════════════════════════════════════════════════
+    #  TAB 3: PROGRESS + LOG
+    # ══════════════════════════════════════════════════════
+    def _build_progress_tab(self, parent):
+        # Stats
+        stat_bar = tk.Frame(parent, bg=C["card2"])
+        stat_bar.pack(fill="x", padx=12, pady=(8,6))
 
-        # ── 5. REMOTE FILES MANAGER ──
-        mgr_card, self.mgr_outer = self._card(pad, "🗂️  MANAGE REMOTE FILES (Edit / Delete)")
-        self.mgr_outer.pack_forget()
+        self.p_uploaded = self._stat(stat_bar,"Uploaded","0",C["green"])
+        self.p_total    = self._stat(stat_bar,"Total","0",C["blue3"])
+        self.p_size     = self._stat(stat_bar,"Data","—",C["purple"])
+        self.p_speed    = self._stat(stat_bar,"Speed","—",C["orange"])
+        self.p_elapsed  = self._stat(stat_bar,"Time","—",C["cyan"])
 
-        mgr_btn_row = tk.Frame(mgr_card, bg=self.C["card"])
-        mgr_btn_row.pack(fill="x", pady=(0, 8))
+        # Progress bar — gradient canvas
+        pb_outer = tk.Frame(parent, bg=C["border"], height=14)
+        pb_outer.pack(fill="x", padx=12, pady=(0,4))
+        pb_outer.pack_propagate(False)
+        self.pb_canvas = tk.Canvas(pb_outer, height=14,
+                                  bg=C["input"], highlightthickness=0)
+        self.pb_canvas.pack(fill="both", expand=True, padx=1, pady=1)
+        self.pb_rect = self.pb_canvas.create_rectangle(
+            0,0,0,14, fill=C["blue1"], outline="")
+        self.pb_glow = self.pb_canvas.create_rectangle(
+            0,0,0,14, fill=C["cyan"], outline="", stipple="gray50")
 
-        self._btn(mgr_btn_row, "🔄 Load Files", self.C["border"],
-                 self.do_load_remote).pack(side="left", padx=(0, 5))
-        self._btn(mgr_btn_row, "📝 Edit Selected", self.C["blue"],
-                 self.do_edit_file).pack(side="left", padx=(0, 5))
-        self._btn(mgr_btn_row, "🗑️ Delete Selected", self.C["red"],
-                 self.do_delete_file).pack(side="left", padx=(0, 5))
-        self._btn(mgr_btn_row, "📄 Create New File", self.C["green"],
-                 self.do_create_file).pack(side="left")
-
-        # Treeview for remote files
-        tree_frame = tk.Frame(mgr_card, bg=self.C["card"])
-        tree_frame.pack(fill="both", expand=True)
-
-        self.file_tree = ttk.Treeview(tree_frame, columns=("path", "size"),
-                                      show="headings", height=6,
-                                      selectmode="browse")
-        self.file_tree.heading("path", text="📄 File Path")
-        self.file_tree.heading("size", text="💾 Size")
-        self.file_tree.column("path", width=500)
-        self.file_tree.column("size", width=100, anchor="e")
-
-        tree_scroll = tk.Scrollbar(tree_frame, orient="vertical",
-                                  command=self.file_tree.yview)
-        self.file_tree.configure(yscrollcommand=tree_scroll.set)
-
-        self.file_tree.pack(side="left", fill="both", expand=True)
-        tree_scroll.pack(side="right", fill="y")
-
-        # ── 6. PROGRESS ──
-        self.prog_card, self.prog_outer = self._card(pad, "📊  UPLOAD PROGRESS")
-        self.prog_outer.pack_forget()
-
-        stat_row = tk.Frame(self.prog_card, bg=self.C["card"])
-        stat_row.pack(fill="x", pady=(0, 8))
-
-        self.stat_up = self._stat_box(stat_row, "Uploaded", "0", self.C["green"])
-        self.stat_tot = self._stat_box(stat_row, "Total", "0", self.C["blue"])
-        self.stat_sz = self._stat_box(stat_row, "Data", "0 B", self.C["purple"])
-        self.stat_spd = self._stat_box(stat_row, "Speed", "—", self.C["orange"])
-
-        # Custom progress bar
-        self.prog_canvas = tk.Canvas(self.prog_card, height=10,
-                                    bg=self.C["input"], highlightthickness=0)
-        self.prog_canvas.pack(fill="x", pady=5)
-        self.prog_rect = self.prog_canvas.create_rectangle(0, 0, 0, 10,
-                                                          fill=self.C["green"],
-                                                          outline="")
-
-        self.lbl_pct = tk.Label(self.prog_card, text="0%",
-                               font=("Segoe UI", 11, "bold"),
-                               bg=self.C["card"], fg=self.C["text"])
+        self.lbl_pct = tk.Label(parent, text="0%",
+                               font=("Segoe UI",12,"bold"),
+                               bg=C["bg"], fg=C["text"])
         self.lbl_pct.pack()
 
-        self.lbl_curfile = tk.Label(self.prog_card, text="",
-                                   font=("Consolas", 8),
-                                   bg=self.C["card"], fg=self.C["muted"],
-                                   wraplength=700)
-        self.lbl_curfile.pack()
+        self.lbl_curfile = tk.Label(parent, text="Ready",
+                                   font=("Consolas",9),
+                                   bg=C["bg"], fg=C["muted"],
+                                   wraplength=900)
+        self.lbl_curfile.pack(pady=(0,8))
 
-        # ── 7. LOG ──
-        log_card, _ = self._card(pad, "📋  ACTIVITY LOG")
+        GradientFrame(parent, C["blue5"], C["purple"],
+                      height=1, bg=C["bg"]).pack(fill="x", padx=12, pady=(0,8))
 
-        log_wrap = tk.Frame(log_card, bg=self.C["card"])
-        log_wrap.pack(fill="both", expand=True)
+        # Log
+        tk.Label(parent, text="📋  Activity Log",
+                font=("Segoe UI",9,"bold"),
+                bg=C["bg"], fg=C["blue3"]).pack(anchor="w", padx=12)
 
-        self.log_box = tk.Text(log_wrap, height=8, font=("Consolas", 9),
-                              bg=self.C["input"], fg=self.C["text"],
-                              insertbackground=self.C["text"],
-                              relief="flat", bd=8, wrap="word")
+        log_f = tk.Frame(parent, bg=C["bg"])
+        log_f.pack(fill="both", expand=True, padx=12, pady=(4,8))
 
-        log_scr = tk.Scrollbar(log_wrap, orient="vertical",
-                              command=self.log_box.yview)
-        self.log_box.configure(yscrollcommand=log_scr.set)
-        log_scr.pack(side="right", fill="y")
-        self.log_box.pack(side="left", fill="both", expand=True)
+        self.log_box = tk.Text(log_f, font=("Consolas",9),
+                              bg=C["input"], fg=C["text"],
+                              insertbackground=C["text"],
+                              relief="flat", bd=8, wrap="word",
+                              selectbackground=C["blue2"])
+        ls = ttk.Scrollbar(log_f, orient="vertical", command=self.log_box.yview)
+        self.log_box.configure(yscrollcommand=ls.set)
+        ls.pack(side="right", fill="y")
+        self.log_box.pack(fill="both", expand=True)
 
-        # Log tags
-        for tag, color in [("green", self.C["green"]), ("blue", self.C["blue"]),
-                           ("red", self.C["red"]), ("orange", self.C["orange"]),
-                           ("muted", self.C["muted"]), ("purple", self.C["purple"]),
-                           ("bold", self.C["text"])]:
-            self.log_box.tag_config(tag, foreground=color)
-        self.log_box.tag_config("bold", font=("Consolas", 9, "bold"))
+        for tag,col in [("g",C["green"]),("b",C["blue3"]),
+                        ("r",C["red"]),("o",C["orange"]),
+                        ("m",C["muted"]),("c",C["cyan"]),
+                        ("p",C["purple"]),
+                        ("H",C["text"])]:
+            self.log_box.tag_config(tag, foreground=col)
+        self.log_box.tag_config("H", font=("Consolas",9,"bold"))
 
-        self._log("🚀 GitHub Uploader Pro v3.0 - Full Feature Edition", "blue")
-        self._log("   Upload • Edit • Delete • Create Repo • Branch Management", "muted")
+        self._log("🚀 GitHub Uploader Pro v4.0 — Ultra Edition", "b")
+        self._log("   Supports: Files • Folders • ZIP • Images • Videos • Audio • Docs", "m")
         if not DND_AVAILABLE:
-            self._log("💡 Untuk drag & drop: pip install tkinterdnd2", "orange")
+            self._log("💡 For drag & drop support: pip install tkinterdnd2", "o")
 
-        # ── 8. FOOTER ──
-        tk.Label(pad, text="Made with ❤️ • GitHub Folder Uploader Pro v3.0",
-                font=("Segoe UI", 8), bg=self.C["bg"],
-                fg=self.C["muted"]).pack(pady=(8, 0))
+    # ══════════════════════════════════════════════════════
+    #  WIDGET HELPERS
+    # ══════════════════════════════════════════════════════
+    def _btn(self, parent, text, bg, cmd, **kw):
+        return tk.Button(parent, text=text, bg=bg, fg="#fff",
+                        font=("Segoe UI",9,"bold"), relief="flat",
+                        cursor="hand2", activebackground=bg,
+                        activeforeground="#fff", command=cmd, **kw)
 
-    def _stat_box(self, parent, title, val, color):
-        f = tk.Frame(parent, bg=self.C["input"], padx=8, pady=6)
+    def _stat(self, parent, label, val, color):
+        f = tk.Frame(parent, bg=C["input"], padx=12, pady=8)
         f.pack(side="left", fill="x", expand=True, padx=3)
-        v = tk.Label(f, text=val, font=("Segoe UI", 13, "bold"),
-                    bg=self.C["input"], fg=color)
+        v = tk.Label(f, text=val, font=("Segoe UI",14,"bold"),
+                    bg=C["input"], fg=color)
         v.pack()
-        tk.Label(f, text=title, font=("Segoe UI", 8),
-                bg=self.C["input"], fg=self.C["muted"]).pack()
+        tk.Label(f, text=label, font=("Segoe UI",8),
+                bg=C["input"], fg=C["muted"]).pack()
         return v
 
-    # ══════════════════════════════════════════════════════
-    #  ACTIONS
-    # ══════════════════════════════════════════════════════
+    def _log(self, msg, tag="m"):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_box.insert("end", f"[{ts}] ", "m")
+        self.log_box.insert("end", f"{msg}\n", tag)
+        self.log_box.see("end")
 
     def _toggle_pw(self, e=None):
-        self.show_pw = not self.show_pw
-        self.token_entry.config(show="" if self.show_pw else "•")
+        self._show_pw = not getattr(self,"_show_pw",False)
+        self.ent_token.config(show="" if self._show_pw else "•")
 
-    def _validate_ready(self):
+    def _validate_upload(self):
         ok = (self.engine is not None
-              and self.selected_folder is not None
+              and len(self.scanned_files) > 0
               and bool(self.repo_var.get())
               and not self.is_uploading)
         if ok:
-            self.btn_upload.config(state="normal", bg=self.C["green"],
-                                  fg="#fff", cursor="hand2")
+            self.btn_upload.config(state="normal", bg=C["blue1"],
+                                  cursor="hand2")
         else:
-            self.btn_upload.config(state="disabled", bg=self.C["border"],
-                                  fg=self.C["muted"], cursor="arrow")
+            self.btn_upload.config(state="disabled", bg=C["border"],
+                                  cursor="arrow")
 
-    def _get_repo_fullname(self):
-        """Extract clean repo full_name from combo display"""
-        display = self.repo_var.get()
-        if not display:
-            return None
-        # Remove emoji prefix like "🔒 " or "🌐 "
-        for prefix in ["🔒 ", "🌐 ", "📂 "]:
-            if display.startswith(prefix):
-                display = display[len(prefix):]
-                break
-        # Also try splitting by space and taking last part
-        parts = display.strip().split()
-        if parts:
-            return parts[-1]
-        return display.strip()
+    def _get_repo(self):
+        d = self.repo_var.get()
+        if not d: return None
+        for pfx in ["🔒 ","🌐 ","📂 "]:
+            if d.startswith(pfx): d = d[len(pfx):]
+        return d.strip().split()[-1] if d.strip() else None
 
-    # ── CONNECT ──
+    def _get_branch(self):
+        return self.branch_combo.get().strip() or "main"
 
+    # ══════════════════════════════════════════════════════
+    #  QUEUE MANAGEMENT
+    # ══════════════════════════════════════════════════════
+    def _add_to_queue(self, paths):
+        """Add file paths or folder paths to upload queue"""
+        if self.engine:
+            new_items = self.engine.scan_items(paths)
+        else:
+            # Basic scan without engine
+            new_items = []
+            for p in paths:
+                p = p.strip().strip("{}\"'")
+                if os.path.isdir(p):
+                    for root, dirs, files in os.walk(p):
+                        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+                        for f in files:
+                            fp = os.path.join(root, f)
+                            rel = os.path.relpath(fp, os.path.dirname(p)).replace("\\","/")
+                            new_items.append({
+                                "full_path": fp,
+                                "rel_path":  rel,
+                                "size":      os.path.getsize(fp),
+                                "ext":       os.path.splitext(f)[1].lower() or ".file"
+                            })
+                elif os.path.isfile(p):
+                    fname = os.path.basename(p)
+                    new_items.append({
+                        "full_path": p,
+                        "rel_path":  fname,
+                        "size":      os.path.getsize(p),
+                        "ext":       os.path.splitext(fname)[1].lower() or ".file"
+                    })
+
+        self.scanned_files.extend(new_items)
+
+        # Update tree
+        for f in new_items:
+            ic   = icon_for(f["ext"])
+            ftyp = get_file_type(f["ext"])
+            self.queue_tree.insert("","end",
+                values=(ic, f["rel_path"], fmt_size(f["size"]), ftyp),
+                tags=(ftyp,))
+
+        self._refresh_stats()
+        self._validate_upload()
+        self.nb.select(0)
+
+    def _refresh_stats(self):
+        n = len(self.scanned_files)
+        total_sz = sum(f["size"] for f in self.scanned_files)
+        types = len({f["ext"] for f in self.scanned_files})
+        self.stat_files.config(text=str(n))
+        self.stat_size.config(text=fmt_size(total_sz))
+        self.stat_types.config(text=str(types))
+
+        if n > 0:
+            self.drop_outer.config(bg=C["green"])
+            self.lbl_dz_icon.config(text="✅", fg=C["green"])
+            self.lbl_dz_title.config(text=f"{n} item(s) queued")
+            self.lbl_dz_sub.config(text=f"Total: {fmt_size(total_sz)} • {types} file types\nReady to upload →")
+        else:
+            self.drop_outer.config(bg=C["border_hi"])
+            self.lbl_dz_icon.config(text="📥", fg=C["blue3"])
+            self.lbl_dz_title.config(text="Drop Anything Here")
+            self.lbl_dz_sub.config(
+                text="Files • Folders • ZIP archives\nImages • Videos • Audio • Code • Documents")
+
+    def clear_queue(self):
+        self.scanned_files = []
+        for item in self.queue_tree.get_children():
+            self.queue_tree.delete(item)
+        self._refresh_stats()
+        self._validate_upload()
+
+    def remove_selected_from_queue(self):
+        sels = self.queue_tree.selection()
+        to_remove = set()
+        for sel in sels:
+            vals = self.queue_tree.item(sel,"values")
+            rel_path = vals[1] if len(vals)>1 else ""
+            to_remove.add(rel_path)
+            self.queue_tree.delete(sel)
+        self.scanned_files = [f for f in self.scanned_files
+                              if f["rel_path"] not in to_remove]
+        self._refresh_stats()
+        self._validate_upload()
+
+    def _queue_ctx(self, e):
+        try: self.queue_menu.tk_popup(e.x_root, e.y_root)
+        finally: self.queue_menu.grab_release()
+
+    # ══════════════════════════════════════════════════════
+    #  BROWSE ACTIONS
+    # ══════════════════════════════════════════════════════
+    def browse_folder(self):
+        p = filedialog.askdirectory(title="Select Folder to Upload")
+        if p: self._add_to_queue([p])
+
+    def browse_files(self):
+        paths = filedialog.askopenfilenames(
+            title="Select Files",
+            filetypes=[("All Files","*.*"),
+                       ("Images","*.png *.jpg *.jpeg *.gif *.svg *.webp *.ico"),
+                       ("Videos","*.mp4 *.avi *.mov *.mkv *.webm"),
+                       ("Audio","*.mp3 *.wav *.flac *.aac *.ogg"),
+                       ("Code","*.py *.js *.ts *.html *.css *.json *.md"),
+                       ("Archives","*.zip *.rar *.tar *.gz *.7z"),
+                       ("Documents","*.pdf *.doc *.docx *.xls *.xlsx")])
+        if paths: self._add_to_queue(list(paths))
+
+    def browse_zip(self):
+        p = filedialog.askopenfilename(
+            title="Select ZIP file",
+            filetypes=[("ZIP files","*.zip"),("All files","*.*")])
+        if p: self._add_to_queue([p])
+
+    # ── DnD ──
+    def _dnd_enter(self, e):
+        self.drop_outer.config(bg=C["blue1"])
+        self.lbl_dz_icon.config(text="⬇️", fg=C["cyan"])
+        self.lbl_dz_title.config(text="Drop it! ⚡", fg=C["cyan"])
+
+    def _dnd_leave(self, e):
+        self._refresh_stats()
+        self.lbl_dz_title.config(fg=C["text"])
+
+    def _dnd_drop(self, e):
+        raw = e.data.strip()
+        # Handle multiple items (space separated, may be wrapped in {})
+        paths = []
+        if raw.startswith("{"):
+            # Parse {path1} {path2} format
+            import re
+            paths = re.findall(r'\{([^}]+)\}|(\S+)', raw)
+            paths = [a or b for a,b in paths]
+        else:
+            paths = raw.split()
+        self._add_to_queue(paths)
+        self._refresh_stats()
+
+    # ══════════════════════════════════════════════════════
+    #  GITHUB ACTIONS
+    # ══════════════════════════════════════════════════════
     def do_connect(self):
-        token = self.token_entry.get().strip()
+        token = self.ent_token.get().strip()
         if not token:
-            messagebox.showwarning("⚠️", "Masukkan GitHub Access Token!")
+            messagebox.showwarning("⚠️","Enter your GitHub token!")
             return
-
-        self.btn_conn.config(text="⏳...", state="disabled")
-        self.lbl_status.config(text="🟡 Menghubungkan...", fg=self.C["orange"])
+        self.btn_conn.config(text="⏳ Connecting...", state="disabled")
+        self.lbl_status.config(text="🟡 Connecting...", fg=C["orange"])
         self.root.update()
 
-        def _work():
+        def _w():
             try:
-                engine = GitHubEngine(token)
-                name = engine.username
-                self.root.after(0, lambda: self._connected(engine, token, name))
-            except Exception as e:
-                self.root.after(0, lambda: self._connect_fail(str(e)))
+                eng  = GitHubEngine(token)
+                user = eng.username
+                self.root.after(0, lambda: self._on_connected(eng, token, user))
+            except Exception as ex:
+                self.root.after(0, lambda: self._on_conn_fail(str(ex)))
+        threading.Thread(target=_w, daemon=True).start()
 
-        threading.Thread(target=_work, daemon=True).start()
-
-    def _connected(self, engine, token, user):
-        self.engine = engine
+    def _on_connected(self, eng, token, user):
+        self.engine = eng
         self.config["token"] = token
-        self._save_config()
-
-        self.btn_conn.config(text="✅ Connected", state="normal",
-                            bg=self.C["green"])
-        self.lbl_status.config(text=f"🟢 Terhubung: @{user}", fg=self.C["cyan"])
-        self._log(f"✅ Terhubung ke GitHub sebagai @{user}", "green")
-
-        # Show file manager
-        self.mgr_outer.pack(fill="x", pady=(0, 12))
-
+        self._save_cfg()
+        self.btn_conn.config(text="✅ Connected", state="normal", bg=C["green"])
+        self.lbl_status.config(text=f"🟢 @{user}", fg=C["green"])
+        self._log(f"✅ Connected as @{user}", "g")
         self.do_refresh_repos()
-        self._validate_ready()
+        self._validate_upload()
 
-    def _connect_fail(self, err):
-        self.btn_conn.config(text="Connect", state="normal")
-        self.lbl_status.config(text="🔴 Gagal!", fg=self.C["red"])
-        self._log(f"❌ Koneksi gagal: {err}", "red")
-        messagebox.showerror("Error", f"Gagal konek:\n{err}")
-
-    # ── REPOS ──
+    def _on_conn_fail(self, err):
+        self.btn_conn.config(text="⚡  Connect to GitHub",
+                            state="normal", bg=C["blue1"])
+        self.lbl_status.config(text="🔴 Failed!", fg=C["red"])
+        self._log(f"❌ Auth error: {err}", "r")
+        messagebox.showerror("Auth Failed", err)
 
     def do_refresh_repos(self):
-        if not self.engine:
-            return
-        self._log("🔄 Memuat daftar repository...", "blue")
-
-        def _work():
+        if not self.engine: return
+        self._log("🔄 Loading repos...", "b")
+        def _w():
             try:
                 repos = self.engine.list_repos()
-                self.root.after(0, lambda: self._repos_loaded(repos))
-            except Exception as e:
-                self.root.after(0, lambda: self._log(f"❌ Error: {e}", "red"))
+                self.root.after(0, lambda: self._on_repos(repos))
+            except Exception as ex:
+                self.root.after(0, lambda: self._log(f"❌ {ex}", "r"))
+        threading.Thread(target=_w, daemon=True).start()
 
-        threading.Thread(target=_work, daemon=True).start()
-
-    def _repos_loaded(self, repos):
+    def _on_repos(self, repos):
         self.repos = repos
         display = []
         for r in repos:
-            icon = "🔒" if r["private"] else "🌐"
-            display.append(f"{icon} {r['full_name']}")
-
+            ic = "🔒" if r["private"] else "🌐"
+            display.append(f"{ic} {r['full_name']}")
         self.repo_combo["values"] = display
         if display:
             self.repo_combo.current(0)
-            self._on_repo_selected()
+            self._on_repo_sel()
+        self._log(f"📦 {len(repos)} repositories loaded", "g")
+        self._validate_upload()
 
-        self._log(f"📦 {len(repos)} repository ditemukan", "green")
-        self._validate_ready()
-
-    def _on_repo_selected(self, e=None):
-        full_name = self._get_repo_fullname()
-        if not full_name:
-            return
-
-        # Find repo info
-        info = None
+    def _on_repo_sel(self, e=None):
+        fn = self._get_repo()
+        if not fn: return
         for r in self.repos:
-            if r["full_name"] == full_name:
-                info = r
+            if r["full_name"] == fn:
+                self.lbl_repo_info.config(
+                    text=f"{'🔒' if r['private'] else '🌐'} "
+                         f"{r['description'][:60] if r['description'] else 'No description'}\n"
+                         f"⭐{r['stars']}  🌿{r['default_branch']}  "
+                         f"{'  '.join(['🔵',r['lang']]) if r['lang'] else ''}")
+                self.branch_combo.set(r["default_branch"])
                 break
-
-        if info:
-            self.lbl_repo_info.config(
-                text=f"📌 {info['full_name']} • "
-                     f"{'🔒 Private' if info['private'] else '🌐 Public'} • "
-                     f"Branch default: {info['default_branch']}"
-            )
-            self.branch_combo.set(info["default_branch"])
-
-        # Load branches in background
-        def _load_branches():
+        def _w():
             try:
-                branches = self.engine.list_branches(full_name)
-                self.root.after(0, lambda: self.branch_combo.config(values=branches))
-            except Exception:
-                pass
-
-        threading.Thread(target=_load_branches, daemon=True).start()
-        self._validate_ready()
-
-    # ── CREATE REPO ──
+                brs = self.engine.list_branches(fn)
+                self.root.after(0, lambda: self.branch_combo.config(values=brs))
+            except: pass
+        threading.Thread(target=_w, daemon=True).start()
+        self._validate_upload()
 
     def do_create_repo(self):
         if not self.engine:
-            messagebox.showwarning("⚠️", "Hubungkan GitHub dulu!")
+            messagebox.showwarning("⚠️","Connect first!")
             return
-
-        name = self.new_repo_entry.get().strip()
-        if not name:
-            messagebox.showwarning("⚠️", "Masukkan nama repo!")
+        name = self.ent_newrepo.get().strip()
+        if not name or name == "repo-name":
+            messagebox.showwarning("⚠️","Enter repository name!")
             return
-
-        self._log(f"📦 Membuat repository '{name}'...", "blue")
-
-        def _work():
+        self._log(f"📦 Creating repo '{name}'...", "b")
+        def _w():
             try:
                 repo = self.engine.create_repo(name, private=self.priv_var.get())
-                self.root.after(0, lambda: self._repo_created(repo))
-            except Exception as e:
-                self.root.after(0, lambda: self._log(f"❌ Gagal: {e}", "red"))
-                self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
-
-        threading.Thread(target=_work, daemon=True).start()
-
-    def _repo_created(self, repo):
-        self._log(f"✅ Repository dibuat: {repo.full_name}", "green")
-        self.new_repo_entry.delete(0, "end")
-        self.do_refresh_repos()
-
-    # ── CREATE BRANCH ──
+                self.root.after(0, lambda: (
+                    self._log(f"✅ Created: {repo.full_name}", "g"),
+                    self.ent_newrepo.delete(0,"end"),
+                    self.ent_newrepo.insert(0,"repo-name"),
+                    self.do_refresh_repos()
+                ))
+            except Exception as ex:
+                self.root.after(0, lambda: self._log(f"❌ {ex}", "r"))
+        threading.Thread(target=_w, daemon=True).start()
 
     def do_create_branch(self):
-        if not self.engine:
+        if not self.engine: return
+        fn = self._get_repo()
+        if not fn:
+            messagebox.showwarning("⚠️","Select a repository first!")
             return
-
-        full_name = self._get_repo_fullname()
-        if not full_name:
-            messagebox.showwarning("⚠️", "Pilih repository dulu!")
-            return
-
-        new_name = simpledialog.askstring(
-            "🌿 New Branch",
-            "Nama branch baru:",
-            parent=self.root
-        )
-        if not new_name:
-            return
-
-        source = self.branch_combo.get() or "main"
-        self._log(f"🌿 Membuat branch '{new_name}' dari '{source}'...", "blue")
-
-        def _work():
+        name = simpledialog.askstring("🌿 New Branch",
+                                     "Branch name:", parent=self.root)
+        if not name: return
+        src = self._get_branch()
+        self._log(f"🌿 Creating branch '{name}' from '{src}'...", "b")
+        def _w():
             try:
-                self.engine.create_branch(full_name, new_name, source)
-                self.root.after(0, lambda: self._branch_created(new_name, full_name))
-            except Exception as e:
-                self.root.after(0, lambda: self._log(f"❌ Gagal: {e}", "red"))
-
-        threading.Thread(target=_work, daemon=True).start()
-
-    def _branch_created(self, name, full_name):
-        self._log(f"✅ Branch '{name}' berhasil dibuat!", "green")
-        # Refresh branches
-        try:
-            branches = self.engine.list_branches(full_name)
-            self.branch_combo.config(values=branches)
-            self.branch_combo.set(name)
-        except Exception:
-            pass
-
-    # ── FOLDER SELECTION ──
-
-    def browse_folder(self):
-        f = filedialog.askdirectory(title="Pilih Folder untuk Upload")
-        if f:
-            self.set_folder(f)
-
-    def set_folder(self, path):
-        path = path.strip("{}\"'")
-        if not os.path.isdir(path):
-            return
-
-        self.selected_folder = path
-        name = os.path.basename(path)
-
-        if self.engine:
-            self.scanned_files = self.engine.scan_folder(path)
-        else:
-            self.scanned_files = []
-            for root, dirs, files in os.walk(path):
-                dirs[:] = [d for d in dirs if d not in {'.git', 'node_modules', '__pycache__'}]
-                for f in files:
-                    fp = os.path.join(root, f)
-                    self.scanned_files.append({
-                        "full_path": fp,
-                        "rel_path": os.path.relpath(fp, path).replace("\\", "/"),
-                        "size": os.path.getsize(fp),
-                        "ext": os.path.splitext(f)[1].lower() or ".file"
-                    })
-
-        total_size = sum(f["size"] for f in self.scanned_files)
-
-        self.drop_outer.config(bg=self.C["green"])
-        self.lbl_drop_icon.config(text="✅", fg=self.C["green"])
-        self.lbl_drop_title.config(text=f"📂 {name}")
-        self.lbl_drop_info.config(
-            text=f"📍 {path}\n"
-                 f"📄 {len(self.scanned_files)} files • 💾 {fmt_size(total_size)}"
-        )
-
-        # Extension badges
-        self.badge_frame.pack(fill="x", pady=(10, 0))
-        for w in self.badge_frame.winfo_children():
-            w.destroy()
-
-        ext_map = {}
-        for f in self.scanned_files:
-            ext_map[f["ext"]] = ext_map.get(f["ext"], 0) + 1
-
-        row = tk.Frame(self.badge_frame, bg=self.C["card"])
-        row.pack()
-        for ext, cnt in sorted(ext_map.items(), key=lambda x: -x[1])[:8]:
-            tk.Label(row, text=f" {icon_for(ext)} {ext} ({cnt}) ",
-                    bg=self.C["input"], fg=self.C["sub"],
-                    font=("Segoe UI", 8), padx=4, pady=1).pack(side="left", padx=2)
-
-        self._log(f"📂 Folder: {name} ({len(self.scanned_files)} files, {fmt_size(total_size)})", "green")
-        self._validate_ready()
-
-    # DnD Handlers
-    def _dnd_enter(self, e):
-        self.drop_outer.config(bg=self.C["blue"])
-        self.lbl_drop_title.config(text="⬇️ Drop sekarang!", fg=self.C["blue"])
-
-    def _dnd_leave(self, e):
-        self.drop_outer.config(
-            bg=self.C["green"] if self.selected_folder else self.C["border"])
-        self.lbl_drop_title.config(fg=self.C["text"])
-
-    def _dnd_drop(self, e):
-        p = e.data.strip("{}\"")
-        if os.path.isdir(p):
-            self.set_folder(p)
-        elif os.path.isfile(p):
-            self.set_folder(os.path.dirname(p))
+                self.engine.create_branch(fn, name, src)
+                brs = self.engine.list_branches(fn)
+                self.root.after(0, lambda: (
+                    self.branch_combo.config(values=brs),
+                    self.branch_combo.set(name),
+                    self._log(f"✅ Branch '{name}' created!", "g")
+                ))
+            except Exception as ex:
+                self.root.after(0, lambda: self._log(f"❌ {ex}", "r"))
+        threading.Thread(target=_w, daemon=True).start()
 
     # ── UPLOAD ──
-
     def do_upload(self):
-        if not self.engine or not self.selected_folder:
+        if not self.engine or not self.scanned_files: return
+        fn = self._get_repo()
+        if not fn:
+            messagebox.showwarning("⚠️","Select a repository!")
             return
 
-        full_name = self._get_repo_fullname()
-        if not full_name:
-            messagebox.showwarning("⚠️", "Pilih repository!")
-            return
-
+        branch  = self._get_branch()
+        commit  = self.ent_commit.get().strip() or "Upload files"
+        target  = self.ent_target.get().strip()
+        if "optional" in target: target = ""
         n = len(self.scanned_files)
-        branch = self.branch_combo.get() or "main"
-        commit = self.commit_entry.get().strip() or "Upload files"
 
-        if not messagebox.askyesno("🚀 Konfirmasi Upload",
-                                   f"Upload {n} file ke:\n"
-                                   f"📦 {full_name}\n"
-                                   f"🌿 Branch: {branch}\n\n"
-                                   f"Lanjutkan?"):
+        if not messagebox.askyesno("🚀 Confirm Upload",
+                                   f"Upload {n} file(s) to:\n"
+                                   f"📦 {fn}\n🌿 {branch}"
+                                   f"{f'  📁 → {target}' if target else ''}\n\n"
+                                   f"Continue?"):
             return
 
         self.is_uploading = True
         self.btn_upload.config(state="disabled", text="⏳ UPLOADING...",
-                             bg=self.C["orange"])
+                             bg=C["orange"])
+        self.nb.select(2)  # Switch to progress tab
 
-        # Show progress
-        self.prog_outer.pack(fill="x", pady=(0, 12))
-        self.stat_up.config(text="0")
-        self.stat_tot.config(text=str(n))
-        self.stat_sz.config(text="0 B")
-        self.stat_spd.config(text="—")
+        # Reset progress
+        self.p_uploaded.config(text="0")
+        self.p_total.config(text=str(n))
+        self.p_size.config(text="—")
+        self.p_speed.config(text="—")
+        self.p_elapsed.config(text="—")
         self.lbl_pct.config(text="0%")
-        self.prog_canvas.coords(self.prog_rect, 0, 0, 0, 10)
-        self.lbl_curfile.config(text="Memulai...")
+        self.pb_canvas.coords(self.pb_rect, 0,0,0,14)
+        self.pb_canvas.coords(self.pb_glow, 0,0,0,14)
+        self.lbl_curfile.config(text="Starting...")
 
-        self._log(f"\n{'═'*50}", "bold")
-        self._log(f"🚀 Upload ke {full_name} ({branch}) dimulai!", "bold")
-        self._log(f"{'═'*50}", "bold")
+        self._log("","m")
+        self._log("═"*60,"H")
+        self._log(f"🚀 Upload started → {fn} [{branch}]","H")
+        self._log("═"*60,"H")
 
-        def _work():
+        files_copy = list(self.scanned_files)
+
+        def _w():
             def cb(ev, data):
-                self.root.after(0, lambda: self._upload_event(ev, data, full_name))
-
+                self.root.after(0, lambda: self._on_upload_ev(ev, data, fn))
             try:
-                self.engine.upload_folder(full_name, self.selected_folder,
-                                         branch, commit, cb)
-            except Exception as e:
-                self.root.after(0, lambda: self._upload_event(
-                    "fatal", {"error": str(e)}, full_name))
+                self.engine.upload_items(fn, files_copy, branch,
+                                        commit, target, cb)
+            except Exception as ex:
+                self.root.after(0, lambda: self._on_upload_ev(
+                    "fatal", {"error": str(ex)}, fn))
 
-        threading.Thread(target=_work, daemon=True).start()
+        threading.Thread(target=_w, daemon=True).start()
 
-    def _upload_event(self, ev, data, repo):
+    def _on_upload_ev(self, ev, data, repo):
         if ev == "start":
-            self.stat_tot.config(text=str(data["total"]))
+            self.p_total.config(text=str(data["total"]))
 
         elif ev == "uploading":
-            f = data["file"]
+            f  = data["file"]
             ic = icon_for(os.path.splitext(f)[1])
-            self.lbl_curfile.config(text=f"{ic} {f}")
+            self.lbl_curfile.config(text=f"{ic}  {f}")
 
         elif ev == "progress":
-            up = data["uploaded"]
-            tot = data["total"]
-            b = data["bytes"]
-            spd = data.get("speed", 0)
-            pct = int(up / tot * 100) if tot else 0
+            up   = data["uploaded"]
+            tot  = data["total"]
+            b    = data["bytes"]
+            spd  = data.get("speed",0)
+            pct  = int(up/tot*100) if tot else 0
 
-            self.stat_up.config(text=str(up))
-            self.stat_sz.config(text=fmt_size(b))
-            self.stat_spd.config(text=f"{fmt_size(int(spd))}/s")
+            self.p_uploaded.config(text=str(up))
+            self.p_size.config(text=fmt_size(b))
+            self.p_speed.config(text=f"{fmt_size(int(spd))}/s")
             self.lbl_pct.config(text=f"{pct}%")
 
-            w = self.prog_canvas.winfo_width()
-            self.prog_canvas.coords(self.prog_rect, 0, 0,
-                                   int(w * pct / 100), 10)
+            w = self.pb_canvas.winfo_width()
+            fw = int(w * pct / 100)
+            self.pb_canvas.coords(self.pb_rect, 0,0,fw,14)
+            self.pb_canvas.coords(self.pb_glow, max(0,fw-20),0,fw,14)
 
-            f = data["file"]
+            f  = data["file"]
             ic = icon_for(os.path.splitext(f)[1])
-            self._log(f"  ✅ {ic} {f} ({up}/{tot})", "green")
+            self._log(f"  ✅ {ic}  {f}  ({up}/{tot})", "g")
 
         elif ev == "file_error":
-            self._log(f"  ❌ {data['file']}: {data['error']}", "red")
+            self._log(f"  ❌ {data['file']}: {data['error']}", "r")
 
         elif ev == "done":
-            up = data["uploaded"]
-            tot = data["total"]
-            errs = data["errors"]
-            elapsed = data.get("elapsed", 0)
+            up      = data["uploaded"]
+            tot     = data["total"]
+            errs    = data["errors"]
+            elapsed = data.get("elapsed",0)
 
-            w = self.prog_canvas.winfo_width()
-            self.prog_canvas.coords(self.prog_rect, 0, 0, w, 10)
+            w = self.pb_canvas.winfo_width()
+            self.pb_canvas.coords(self.pb_rect, 0,0,w,14)
+            self.pb_canvas.coords(self.pb_glow, max(0,w-30),0,w,14)
             self.lbl_pct.config(text="100% ✅")
-            self.lbl_curfile.config(text="✨ Selesai!")
-            self.stat_spd.config(text=fmt_time(elapsed))
+            self.lbl_curfile.config(text="✨ All done!")
+            self.p_elapsed.config(text=fmt_time(elapsed))
 
             self.is_uploading = False
-            self._validate_ready()
-            self.btn_upload.config(text="🚀  UPLOAD FOLDER TO GITHUB")
+            self.btn_upload.config(text="🚀  UPLOAD TO GITHUB",
+                                  bg=C["blue1"])
+            self._validate_upload()
 
-            self._log(f"\n{'═'*50}", "bold")
-            self._log(f"🎉 Selesai! {up}/{tot} file terupload", "green")
-            self._log(f"💾 Total: {fmt_size(data['bytes'])} dalam {fmt_time(elapsed)}", "blue")
-            if errs:
-                self._log(f"⚠️ {len(errs)} error", "orange")
-            self._log(f"{'═'*50}", "bold")
+            self._log("═"*60,"H")
+            self._log(f"🎉 Done! {up}/{tot} files uploaded","g")
+            self._log(f"💾 {fmt_size(data['bytes'])} in {fmt_time(elapsed)}","b")
+            if errs: self._log(f"⚠️ {len(errs)} errors","o")
+            self._log("═"*60,"H")
 
-            if messagebox.askyesno("🎉 Upload Berhasil!",
-                                   f"✅ {up}/{tot} file terupload!\n"
-                                   f"💾 {fmt_size(data['bytes'])} dalam {fmt_time(elapsed)}\n\n"
-                                   f"Buka di browser?"):
+            if messagebox.askyesno("🎉 Upload Complete!",
+                                   f"✅ {up}/{tot} files uploaded!\n"
+                                   f"💾 {fmt_size(data['bytes'])} in {fmt_time(elapsed)}\n\n"
+                                   f"Open repository in browser?"):
                 webbrowser.open(f"https://github.com/{repo}")
 
         elif ev == "fatal":
             self.is_uploading = False
-            self._validate_ready()
-            self.btn_upload.config(text="🚀  UPLOAD FOLDER TO GITHUB")
-            self._log(f"💥 Fatal: {data['error']}", "red")
-            messagebox.showerror("Error", data["error"])
+            self.btn_upload.config(text="🚀  UPLOAD TO GITHUB",
+                                  bg=C["blue1"])
+            self._validate_upload()
+            self._log(f"💥 Fatal: {data['error']}", "r")
+            messagebox.showerror("Upload Error", data["error"])
 
     # ── REMOTE FILE MANAGER ──
-
     def do_load_remote(self):
-        full_name = self._get_repo_fullname()
-        if not full_name or not self.engine:
-            messagebox.showwarning("⚠️", "Pilih repository dan connect dulu!")
+        fn = self._get_repo()
+        if not fn or not self.engine:
+            messagebox.showwarning("⚠️","Select a repo and connect first!")
             return
+        branch = self._get_branch()
+        self._log(f"🔄 Loading remote files from {fn}...", "b")
 
-        branch = self.branch_combo.get() or "main"
-        self._log(f"🔄 Memuat file remote dari {full_name}...", "blue")
-
-        def _work():
+        def _w():
             try:
-                files = self.engine.list_remote_files(full_name, branch)
-                self.root.after(0, lambda: self._remote_loaded(files))
-            except Exception as e:
-                self.root.after(0, lambda: self._log(f"❌ Error: {e}", "red"))
+                files = self.engine.list_remote_files(fn, branch)
+                self.root.after(0, lambda: self._on_remote_loaded(files))
+            except Exception as ex:
+                self.root.after(0, lambda: self._log(f"❌ {ex}", "r"))
+        threading.Thread(target=_w, daemon=True).start()
 
-        threading.Thread(target=_work, daemon=True).start()
-
-    def _remote_loaded(self, files):
+    def _on_remote_loaded(self, files):
         self.remote_files = files
+        self._fill_remote_tree(files)
+        self._log(f"📄 {len(files)} remote files loaded", "g")
 
-        # Clear tree
-        for item in self.file_tree.get_children():
-            self.file_tree.delete(item)
-
+    def _fill_remote_tree(self, files):
+        for item in self.remote_tree.get_children():
+            self.remote_tree.delete(item)
         for f in files:
-            ic = icon_for(os.path.splitext(f["path"])[1])
-            self.file_tree.insert("", "end", values=(
-                f"{ic}  {f['path']}",
-                fmt_size(f["size"])
-            ))
+            ext  = os.path.splitext(f["path"])[1].lower()
+            ic   = icon_for(ext)
+            ftyp = get_file_type(ext)
+            sha_short = f["sha"][:7] if f["sha"] else ""
+            self.remote_tree.insert("","end",
+                values=(ic, f["path"], fmt_size(f["size"]), sha_short),
+                tags=(ftyp,))
 
-        self._log(f"📄 {len(files)} file ditemukan di remote", "green")
+    def _filter_remote(self, e=None):
+        q = self.ent_search.get().lower()
+        filtered = [f for f in self.remote_files if q in f["path"].lower()]
+        self._fill_remote_tree(filtered)
 
-    def _get_selected_remote_file(self):
-        sel = self.file_tree.selection()
+    def _selected_remote(self):
+        sel = self.remote_tree.selection()
         if not sel:
-            messagebox.showwarning("⚠️", "Pilih file di daftar terlebih dahulu!")
+            messagebox.showwarning("⚠️","Select a file first!")
             return None, None
-
-        values = self.file_tree.item(sel[0], "values")
-        # Extract path (remove icon)
-        display_path = values[0]
-        # Remove leading emoji + spaces
-        clean_path = display_path
-        for ic in ICONS.values():
-            if clean_path.startswith(ic):
-                clean_path = clean_path[len(ic):].strip()
-                break
-        if clean_path.startswith("📄"):
-            clean_path = clean_path[2:].strip()
-
-        # Find matching remote file
+        vals = self.remote_tree.item(sel[0],"values")
+        display = vals[1] if len(vals)>1 else ""
+        # Find in remote files
         for rf in self.remote_files:
-            if rf["path"] == clean_path:
+            if rf["path"] == display:
                 return rf["path"], rf["sha"]
-
-        # Fallback: try matching by end of string
+        # Fuzzy
         for rf in self.remote_files:
-            if clean_path.endswith(rf["path"]) or rf["path"].endswith(clean_path.strip()):
+            if display in rf["path"] or rf["path"] in display:
                 return rf["path"], rf["sha"]
-
-        messagebox.showerror("Error", f"File tidak ditemukan: {clean_path}")
+        messagebox.showerror("Error", f"File not found: {display}")
         return None, None
 
     def do_edit_file(self):
-        full_name = self._get_repo_fullname()
-        if not full_name or not self.engine:
-            return
-
-        file_path, sha = self._get_selected_remote_file()
-        if not file_path:
-            return
-
-        branch = self.branch_combo.get() or "main"
-        self._log(f"📝 Loading {file_path} for editing...", "blue")
-
-        def _work():
+        fn = self._get_repo()
+        if not fn or not self.engine: return
+        path, sha = self._selected_remote()
+        if not path: return
+        branch = self._get_branch()
+        self._log(f"📝 Loading {path}...", "b")
+        def _w():
             try:
-                content, current_sha = self.engine.get_file_content(
-                    full_name, file_path, branch)
-                self.root.after(0, lambda: self._open_editor(
-                    full_name, file_path, content, current_sha, branch))
-            except Exception as e:
-                self.root.after(0, lambda: self._log(f"❌ Error: {e}", "red"))
-                self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
+                content, cur_sha = self.engine.get_file(fn, path, branch)
+                self.root.after(0, lambda: self._editor(
+                    fn, path, content, cur_sha, branch, edit=True))
+            except Exception as ex:
+                self.root.after(0, lambda: (
+                    self._log(f"❌ {ex}","r"),
+                    messagebox.showerror("Error",str(ex))))
+        threading.Thread(target=_w, daemon=True).start()
 
-        threading.Thread(target=_work, daemon=True).start()
+    def _editor(self, fn, path, content, sha, branch, edit=True):
+        ed = tk.Toplevel(self.root)
+        ed.title(f"{'📝 Edit' if edit else '📄 Create'}: {path}")
+        ed.geometry("900x650")
+        ed.configure(bg=C["bg"])
+        ed.transient(self.root)
+        ed.grab_set()
 
-    def _open_editor(self, full_name, file_path, content, sha, branch):
-        """Open file editor window"""
-        editor = tk.Toplevel(self.root)
-        editor.title(f"📝 Edit: {file_path}")
-        editor.geometry("750x550")
-        editor.configure(bg=self.C["bg"])
-        editor.transient(self.root)
-        editor.grab_set()
+        GradientFrame(ed, C["blue5"], C["cyan"], height=3, bg=C["bg"]).pack(fill="x")
 
         # Header
-        hdr = tk.Frame(editor, bg=self.C["card"], padx=15, pady=10)
+        hdr = tk.Frame(ed, bg=C["card"], padx=16, pady=10)
         hdr.pack(fill="x")
+        tk.Label(hdr, text=f"{'📝' if edit else '📄'} {path}",
+                font=("Segoe UI",11,"bold"),
+                bg=C["card"], fg=C["text"]).pack(side="left")
+        tk.Label(hdr, text=f"📦 {fn}  🌿 {branch}",
+                font=("Segoe UI",9),
+                bg=C["card"], fg=C["sub"]).pack(side="right")
 
-        tk.Label(hdr, text=f"📝 Editing: {file_path}",
-                font=("Segoe UI", 11, "bold"),
-                bg=self.C["card"], fg=self.C["text"]).pack(side="left")
+        # Editor
+        ef = tk.Frame(ed, bg=C["bg"])
+        ef.pack(fill="both", expand=True, padx=8, pady=8)
 
-        tk.Label(hdr, text=f"📦 {full_name} • 🌿 {branch}",
-                font=("Segoe UI", 9),
-                bg=self.C["card"], fg=self.C["sub"]).pack(side="right")
-
-        # Text editor
-        text_frame = tk.Frame(editor, bg=self.C["bg"])
-        text_frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-        text_widget = tk.Text(text_frame, font=("Consolas", 11),
-                             bg=self.C["input"], fg=self.C["text"],
-                             insertbackground=self.C["text"],
-                             relief="flat", bd=8, wrap="none",
-                             undo=True)
-
-        sx = tk.Scrollbar(text_frame, orient="horizontal",
-                         command=text_widget.xview)
-        sy = tk.Scrollbar(text_frame, orient="vertical",
-                         command=text_widget.yview)
-        text_widget.configure(xscrollcommand=sx.set, yscrollcommand=sy.set)
-
+        txt = tk.Text(ef, font=("Consolas",11),
+                     bg=C["input"], fg=C["text"],
+                     insertbackground=C["cyan"],
+                     relief="flat", bd=8, wrap="none", undo=True,
+                     selectbackground=C["blue2"])
+        sx = ttk.Scrollbar(ef, orient="horizontal", command=txt.xview)
+        sy = ttk.Scrollbar(ef, orient="vertical",   command=txt.yview)
+        txt.configure(xscrollcommand=sx.set, yscrollcommand=sy.set)
         sy.pack(side="right", fill="y")
         sx.pack(side="bottom", fill="x")
-        text_widget.pack(fill="both", expand=True)
+        txt.pack(fill="both", expand=True)
+        txt.insert("1.0", content)
 
-        text_widget.insert("1.0", content)
-
-        # Commit message
-        bottom = tk.Frame(editor, bg=self.C["card"], padx=15, pady=10)
-        bottom.pack(fill="x")
-
-        tk.Label(bottom, text="Commit:", font=("Segoe UI", 9),
-                bg=self.C["card"], fg=self.C["sub"]).pack(side="left")
-
-        commit_e = tk.Entry(bottom, font=("Segoe UI", 10),
-                           bg=self.C["input"], fg=self.C["text"],
-                           insertbackground=self.C["text"],
-                           relief="flat", bd=5)
-        commit_e.pack(side="left", fill="x", expand=True, padx=8)
-        commit_e.insert(0, f"Edit {file_path} via Uploader Pro")
+        # Bottom bar
+        bot = tk.Frame(ed, bg=C["card"], padx=12, pady=8)
+        bot.pack(fill="x")
+        tk.Label(bot, text="💬", bg=C["card"],
+                font=("Segoe UI",10)).pack(side="left")
+        cm = tk.Entry(bot, font=("Segoe UI",10),
+                     bg=C["input"], fg=C["text"],
+                     insertbackground=C["text"],
+                     relief="flat", bd=5)
+        cm.pack(side="left", fill="x", expand=True, padx=8)
+        cm.insert(0, f"{'Update' if edit else 'Create'} {path} via Uploader Pro")
 
         def _save():
-            new_content = text_widget.get("1.0", "end-1c")
-            msg = commit_e.get().strip() or f"Update {file_path}"
-
-            def _work():
+            new = txt.get("1.0","end-1c")
+            msg = cm.get().strip() or f"Update {path}"
+            def _w():
                 try:
-                    self.engine.update_single_file(
-                        full_name, file_path, new_content,
-                        sha, branch, msg
-                    )
-                    self.root.after(0, lambda: self._log(
-                        f"✅ File updated: {file_path}", "green"))
-                    self.root.after(0, editor.destroy)
-                    self.root.after(100, self.do_load_remote)
-                except Exception as e:
-                    self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
+                    if edit:
+                        self.engine.update_file(fn, path, new, sha, branch, msg)
+                    else:
+                        self.engine.create_file(fn, path, new, branch, msg)
+                    self.root.after(0, lambda: (
+                        self._log(f"✅ {'Updated' if edit else 'Created'}: {path}", "g"),
+                        ed.destroy(),
+                        self.do_load_remote()
+                    ))
+                except Exception as ex:
+                    self.root.after(0, lambda: messagebox.showerror("Error",str(ex)))
+            threading.Thread(target=_w, daemon=True).start()
 
-            threading.Thread(target=_work, daemon=True).start()
-
-        save_btn = self._btn(bottom, "💾 Save & Push", self.C["green"], _save)
-        save_btn.pack(side="right")
+        self._btn(bot, f"{'💾 Save & Push' if edit else '📄 Create & Push'}",
+                 C["green"], _save, padx=16, pady=7).pack(side="right")
+        self._btn(bot, "✖ Cancel", C["border"],
+                 ed.destroy, padx=12, pady=7).pack(side="right", padx=(0,8))
 
     def do_delete_file(self):
-        full_name = self._get_repo_fullname()
-        if not full_name or not self.engine:
+        fn = self._get_repo()
+        if not fn or not self.engine: return
+        path, sha = self._selected_remote()
+        if not path: return
+        if not messagebox.askyesno("🗑️ Delete File",
+                                   f"Delete:\n{path}\n\nThis cannot be undone!"):
             return
-
-        file_path, sha = self._get_selected_remote_file()
-        if not file_path:
-            return
-
-        if not messagebox.askyesno("🗑️ Hapus File?",
-                                   f"Hapus file:\n{file_path}\n\n"
-                                   f"dari {full_name}?\n\n"
-                                   f"Aksi ini tidak bisa dibatalkan!"):
-            return
-
-        branch = self.branch_combo.get() or "main"
-        self._log(f"🗑️ Menghapus {file_path}...", "orange")
-
-        def _work():
+        branch = self._get_branch()
+        self._log(f"🗑️ Deleting {path}...", "o")
+        def _w():
             try:
-                self.engine.delete_file(
-                    full_name, file_path, sha, branch,
-                    f"Delete {file_path} via Uploader Pro"
-                )
-                self.root.after(0, lambda: self._log(
-                    f"✅ File dihapus: {file_path}", "green"))
-                self.root.after(0, self.do_load_remote)
-            except Exception as e:
-                self.root.after(0, lambda: self._log(f"❌ Error: {e}", "red"))
-
-        threading.Thread(target=_work, daemon=True).start()
+                self.engine.delete_file(fn, path, sha, branch,
+                                       f"Delete {path} via Uploader Pro")
+                self.root.after(0, lambda: (
+                    self._log(f"✅ Deleted: {path}", "g"),
+                    self.do_load_remote()
+                ))
+            except Exception as ex:
+                self.root.after(0, lambda: self._log(f"❌ {ex}", "r"))
+        threading.Thread(target=_w, daemon=True).start()
 
     def do_create_file(self):
-        full_name = self._get_repo_fullname()
-        if not full_name or not self.engine:
-            messagebox.showwarning("⚠️", "Connect dan pilih repo dulu!")
+        fn = self._get_repo()
+        if not fn or not self.engine:
+            messagebox.showwarning("⚠️","Connect and select a repo first!")
             return
+        path = simpledialog.askstring("📄 Create File",
+                                     "File path (e.g. src/hello.py):",
+                                     parent=self.root)
+        if not path: return
+        branch = self._get_branch()
+        self._editor(fn, path, "", "", branch, edit=False)
 
-        branch = self.branch_combo.get() or "main"
-
-        # Dialog for file path
-        file_path = simpledialog.askstring(
-            "📄 Create New File",
-            "Path file baru (contoh: src/hello.py):",
-            parent=self.root
-        )
-        if not file_path:
+    def do_create_folder(self):
+        fn = self._get_repo()
+        if not fn or not self.engine:
+            messagebox.showwarning("⚠️","Connect and select a repo first!")
             return
-
-        # Open editor with empty content
-        self._open_creator(full_name, file_path, branch)
-
-    def _open_creator(self, full_name, file_path, branch):
-        editor = tk.Toplevel(self.root)
-        editor.title(f"📄 Create: {file_path}")
-        editor.geometry("750x550")
-        editor.configure(bg=self.C["bg"])
-        editor.transient(self.root)
-        editor.grab_set()
-
-        hdr = tk.Frame(editor, bg=self.C["card"], padx=15, pady=10)
-        hdr.pack(fill="x")
-
-        tk.Label(hdr, text=f"📄 New File: {file_path}",
-                font=("Segoe UI", 11, "bold"),
-                bg=self.C["card"], fg=self.C["text"]).pack(side="left")
-
-        text_frame = tk.Frame(editor, bg=self.C["bg"])
-        text_frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-        text_widget = tk.Text(text_frame, font=("Consolas", 11),
-                             bg=self.C["input"], fg=self.C["text"],
-                             insertbackground=self.C["text"],
-                             relief="flat", bd=8, wrap="none", undo=True)
-
-        sy = tk.Scrollbar(text_frame, orient="vertical",
-                         command=text_widget.yview)
-        text_widget.configure(yscrollcommand=sy.set)
-        sy.pack(side="right", fill="y")
-        text_widget.pack(fill="both", expand=True)
-
-        bottom = tk.Frame(editor, bg=self.C["card"], padx=15, pady=10)
-        bottom.pack(fill="x")
-
-        commit_e = tk.Entry(bottom, font=("Segoe UI", 10),
-                           bg=self.C["input"], fg=self.C["text"],
-                           insertbackground=self.C["text"],
-                           relief="flat", bd=5)
-        commit_e.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        commit_e.insert(0, f"Create {file_path}")
-
-        def _create():
-            content = text_widget.get("1.0", "end-1c")
-            msg = commit_e.get().strip() or f"Create {file_path}"
-
-            def _work():
-                try:
-                    self.engine.create_single_file(
-                        full_name, file_path, content, branch, msg
-                    )
-                    self.root.after(0, lambda: self._log(
-                        f"✅ File dibuat: {file_path}", "green"))
-                    self.root.after(0, editor.destroy)
-                    self.root.after(100, self.do_load_remote)
-                except Exception as e:
-                    self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
-
-            threading.Thread(target=_work, daemon=True).start()
-
-        self._btn(bottom, "📄 Create & Push", self.C["green"], _create).pack(side="right")
+        branch = self._get_branch()
+        folder = simpledialog.askstring("📁 Create Folder",
+                                       "Folder path (e.g. src/utils):",
+                                       parent=self.root)
+        if not folder: return
+        self._log(f"📁 Creating folder '{folder}'...", "b")
+        def _w():
+            try:
+                self.engine.create_folder(fn, folder, branch,
+                                         f"Create folder {folder} via Uploader Pro")
+                self.root.after(0, lambda: (
+                    self._log(f"✅ Folder created: {folder}", "g"),
+                    self.do_load_remote()
+                ))
+            except Exception as ex:
+                self.root.after(0, lambda: self._log(f"❌ {ex}", "r"))
+        threading.Thread(target=_w, daemon=True).start()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1507,10 +1653,10 @@ class App:
 # ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     print("""
-    ╔══════════════════════════════════════════════════╗
-    ║  🚀 GitHub Folder Uploader Pro v3.0              ║
-    ║  Full Feature Edition                            ║
-    ║  Upload • Edit • Delete • Create • Branch Mgmt   ║
-    ╚══════════════════════════════════════════════════╝
+    ╔══════════════════════════════════════════════════════╗
+    ║  🚀 GitHub Uploader Pro  ·  v4.0 Ultra Edition      ║
+    ║  Files • Folders • ZIP • Images • Videos • Audio    ║
+    ║  Modern Landscape UI  •  Blue Gradient Theme         ║
+    ╚══════════════════════════════════════════════════════╝
     """)
     App()
